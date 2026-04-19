@@ -1,0 +1,62 @@
+import { PROHIBITED_WORDS } from "@/lib/prompts";
+
+const DEFAULT_REPLACE_INFO_TEXT = "暂无替换信息，请根据笔记内容进行通用改写";
+
+function injectTemplateVariable(
+  template: string,
+  variableName: string,
+  injectedContent: string,
+  fallbackHeading: string
+) {
+  if (template.includes(variableName)) {
+    return template.split(variableName).join(injectedContent);
+  }
+
+  const trimmedTemplate = template.trimEnd();
+  const separator = trimmedTemplate ? "\n\n" : "";
+  return `${trimmedTemplate}${separator}${fallbackHeading}\n\n${injectedContent}`;
+}
+
+export function injectReplaceInfo(template: string, replaceInfo: string) {
+  return injectTemplateVariable(
+    template,
+    "{{REPLACE_INFO}}",
+    replaceInfo || DEFAULT_REPLACE_INFO_TEXT,
+    "## 替换信息"
+  );
+}
+
+export function injectProhibitedWords(template: string) {
+  return injectTemplateVariable(
+    template,
+    "{{PROHIBITED_WORDS}}",
+    PROHIBITED_WORDS,
+    "## 严禁包含的违禁词"
+  );
+}
+
+export function buildOriginalAndRewrittenBlock(
+  original: { title: string; body: string; coverText: string },
+  rewritten: { title: string; body: string; coverText: string }
+) {
+  return `原始标题：${original.title}
+原始正文：${original.body}
+原始封面文案：${original.coverText}
+
+二创标题：${rewritten.title}
+二创正文：${rewritten.body}
+二创封面文案：${rewritten.coverText}`;
+}
+
+export function injectOriginalAndRewritten(
+  template: string,
+  original: { title: string; body: string; coverText: string },
+  rewritten: { title: string; body: string; coverText: string }
+) {
+  return injectTemplateVariable(
+    template,
+    "{{ORIGINAL_AND_REWRITTEN}}",
+    buildOriginalAndRewrittenBlock(original, rewritten),
+    "## 原文与二创内容"
+  );
+}

@@ -1,0 +1,1976 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Sparkles,
+  Save,
+  Upload,
+  ChevronDown,
+  ChevronUp,
+  Check,
+  Edit3,
+  X,
+  Plus,
+  Trash2,
+  BookOpen,
+  ToggleLeft,
+  ToggleRight,
+} from "lucide-react";
+import clsx from "clsx";
+import { useAppStore } from "@/store/appStore";
+import {
+  parseExtractedReplaceEntries,
+  useRewriteSettingsStore,
+  type ReplaceEntryDraft,
+  type ReplaceLibraryScope,
+} from "@/store/rewriteSettingsStore";
+import { usePromptsSettingsStore } from "@/store/promptsSettingsStore";
+import { dedupeTags, extractTagsFromText, sanitizeTitle } from "@/lib/xhs";
+import type { RewriteResult } from "@/types";
+import Image from "next/image";
+
+type TemplateOption = {
+  id: number;
+  src: string;
+  mainPos: string;
+  subPos: string;
+};
+
+type ImageEditMode = "text" | "image";
+
+type ExtractedReplaceInfoByScope = Record<ReplaceLibraryScope, string[]>;
+type PendingExtractedEntriesByScope = Record<ReplaceLibraryScope, ReplaceEntryDraft[]>;
+
+const TEMPLATE_OPTIONS: TemplateOption[] = [
+  {
+    id: 1,
+    src: "/templates/template1.png",
+    mainPos: "画面正中央，超大加粗黑体，字色为白色或亮黄色，占画面高度约 40%",
+    subPos: "主标题正下方，中等字号细体，字色浅白，水平居中",
+  },
+  {
+    id: 2,
+    src: "/templates/template2.png",
+    mainPos: "顶部偏中，大字加粗，深黑色字，横排居中",
+    subPos: "主标题下方约 1/3 处，小字细体，灰色，居中排列",
+  },
+  {
+    id: 3,
+    src: "/templates/template3.png",
+    mainPos: "画面上半部居中，特大加粗字，白色字体，带轻微阴影增强可读性",
+    subPos: "主标题下方，中等字号，白色半透明，居中",
+  },
+  {
+    id: 4,
+    src: "/templates/template4.png",
+    mainPos: "画面左上角到中间斜线布局，超大加粗字，亮色（白/金/橙），视觉冲击强",
+    subPos: "主标题右下方或底部，小字，亮白色，与主标题错位排列",
+  },
+  {
+    id: 6,
+    src: "/templates/template6.png",
+    mainPos: "颜色较深的色块区域，超大字号加粗，白色字体居中",
+    subPos: "颜色较浅的色块区域，中等字号，深色字体居中",
+  },
+  {
+    id: 7,
+    src: "/templates/template7.png",
+    mainPos: "画面中上方，大字竖排或横排，深棕/黑色毛笔或粗宋体字",
+    subPos: "主标题下方，小字细体，棕灰色，横排居中",
+  },
+];
+
+const LIBRARY_SCOPES: Array<{ scope: ReplaceLibraryScope; label: string; desc: string }> = [
+  { scope: "title", label: "标题词库", desc: "只作用在标题生成" },
+  { scope: "body", label: "正文词库", desc: "只作用在正文生成" },
+  { scope: "cover", label: "封面文案词库", desc: "只作用在封面文案生成" },
+];
+
+async function callRewriteApi(payload: Record<string, unknown>) {
+  const res = await fetch("/api/ai/rewrite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || "AI处理失败");
+  }
+  return data as { result?: string };
+}
+
+async function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function callJimengGenerate(payload: {
+  prompt: string;
+  ratio?: string;
+  resolution?: string;
+  templateSrc?: string;
+  referenceImageSrc?: string;
+}) {
+  const res = await fetch("/api/jimeng/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || "封面生成失败");
+  }
+  return data as { imageUrl?: string };
+}
+
+function hasBlankLineParagraphs(value: string) {
+  return /\n\s*\n/.test(value.replace(/\r\n/g, "\n"));
+}
+
+function normalizeRewrittenBody(value: string, originalBody = "") {
+  const normalized = value
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+\n/g, "\n\n")
+    .trim();
+
+  if (!normalized) return "";
+
+  if (hasBlankLineParagraphs(originalBody)) {
+    return normalized.replace(/\n{3,}/g, "\n\n");
+  }
+
+  return normalized.replace(/\n\s*\n+/g, "\n");
+}
+
+function stripCoverTextLabel(value: string, label: "主标题" | "副标题") {
+  return value.replace(new RegExp(`^${label}[：:]\\s*`), "").trim();
+}
+
+function splitCoverTextSegments(value: string) {
+  return value
+    .split(/[\/／]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function parseCoverText(coverText: string): { main: string; subLines: string[] } {
+  const lines = coverText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return { main: "", subLines: [] };
+  }
+
+  const mainLine = lines.find((line) => /^主标题[：:]/.test(line));
+  const subLine = lines.find((line) => /^副标题[：:]/.test(line));
+
+  if (mainLine || subLine) {
+    return {
+      main: mainLine ? stripCoverTextLabel(mainLine, "主标题") : "",
+      subLines: subLine ? splitCoverTextSegments(stripCoverTextLabel(subLine, "副标题")) : [],
+    };
+  }
+
+  return {
+    main: lines[0],
+    subLines: lines.slice(1).flatMap(splitCoverTextSegments),
+  };
+}
+
+function buildTemplateCoverPrompt(coverText: string, template: TemplateOption) {
+  const { main, subLines } = parseCoverText(coverText);
+  const subtitleInstruction =
+    subLines.length === 0
+      ? ""
+      : subLines.length === 1
+        ? `副标题替换为「${subLines[0]}」，保持在模板原副标题位置（${template.subPos}）。`
+        : `副标题保持在模板原副标题位置（${template.subPos}），按多行排版，依次写为：${subLines
+            .map((line, index) => `第${index + 1}行「${line}」`)
+            .join("；")}。`;
+
+  return [
+    "严格复用输入模板图的版式结构、配色方案、字体层级和整体视觉风格，只替换其中的文案内容，不改变排版骨架。",
+    `主标题替换为「${main || coverText}」，保持在模板原主标题位置（${template.mainPos}）。`,
+    subtitleInstruction,
+    "如果副标题有多行，必须按换行排版展示，禁止把斜杠、分隔符直接画进图片文字里。",
+    "文字须清晰可读，输出 3:4 竖版小红书封面，2K 画质。",
+    "禁止添加任何与文案无关的装饰文字或额外信息。",
+  ].filter(Boolean).join(" ");
+}
+
+function buildDisplayTags(result: RewriteResult): string[] {
+  return dedupeTags(
+    result.rewrittenTags.length > 0
+      ? result.rewrittenTags
+      : (result.originalNote.originalTags || [])
+  );
+}
+
+function buildOriginalTags(result: RewriteResult): string[] {
+  return dedupeTags(result.originalNote.originalTags || []);
+}
+
+function parseTagDraft(input: string): string[] {
+  const extracted = extractTagsFromText(input);
+  if (extracted.length > 0) return extracted;
+  return dedupeTags(input.split(/[\s、，,\n]+/));
+}
+
+function formatTagDraft(tags: string[]): string {
+  return dedupeTags(tags).join("");
+}
+
+function buildReplaceEntryKey(entry: { original: string; replacement: string }) {
+  return `${entry.original.trim()}→${entry.replacement.trim()}`;
+}
+
+function createEmptyPendingExtractedEntries(): PendingExtractedEntriesByScope {
+  return {
+    title: [],
+    body: [],
+    cover: [],
+  };
+}
+
+function collectUniqueExtractedEntries(
+  rawList: string[],
+  excludedEntries: Array<{ original: string; replacement: string }>
+) {
+  const existingKeys = new Set(excludedEntries.map(buildReplaceEntryKey));
+  const collected: ReplaceEntryDraft[] = [];
+
+  for (const raw of rawList) {
+    for (const entry of parseExtractedReplaceEntries(raw)) {
+      const key = buildReplaceEntryKey(entry);
+      if (existingKeys.has(key)) continue;
+      existingKeys.add(key);
+      collected.push(entry);
+    }
+  }
+
+  return collected;
+}
+
+function normalizeExtractedByScope(value: unknown): ExtractedReplaceInfoByScope {
+  const fallback: ExtractedReplaceInfoByScope = {
+    title: [],
+    body: [],
+    cover: [],
+  };
+
+  if (!value || typeof value !== "object") return fallback;
+
+  const source = value as Partial<Record<ReplaceLibraryScope, unknown>>;
+  return {
+    title: Array.isArray(source.title)
+      ? source.title.filter((item): item is string => typeof item === "string")
+      : [],
+    body: Array.isArray(source.body)
+      ? source.body.filter((item): item is string => typeof item === "string")
+      : [],
+    cover: Array.isArray(source.cover)
+      ? source.cover.filter((item): item is string => typeof item === "string")
+      : [],
+  };
+}
+
+function countPendingExtractedEntries(entriesByScope: PendingExtractedEntriesByScope) {
+  return LIBRARY_SCOPES.reduce(
+    (sum, item) => sum + entriesByScope[item.scope].length,
+    0
+  );
+}
+
+function buildEntryKeys(entries: Array<{ original: string; replacement: string }>) {
+  return new Set(entries.map(buildReplaceEntryKey));
+}
+
+function removeScopedEntries(
+  current: PendingExtractedEntriesByScope,
+  entriesToRemove: PendingExtractedEntriesByScope
+): PendingExtractedEntriesByScope {
+  const titleKeys = buildEntryKeys(entriesToRemove.title);
+  const bodyKeys = buildEntryKeys(entriesToRemove.body);
+  const coverKeys = buildEntryKeys(entriesToRemove.cover);
+
+  return {
+    title: current.title.filter((entry) => !titleKeys.has(buildReplaceEntryKey(entry))),
+    body: current.body.filter((entry) => !bodyKeys.has(buildReplaceEntryKey(entry))),
+    cover: current.cover.filter((entry) => !coverKeys.has(buildReplaceEntryKey(entry))),
+  };
+}
+
+function buildScopeCountLabel(entriesByScope: PendingExtractedEntriesByScope) {
+  return LIBRARY_SCOPES
+    .map((item) => {
+      const count = entriesByScope[item.scope].length;
+      if (count === 0) return "";
+      return `${item.label}${count}条`;
+    })
+    .filter(Boolean)
+    .join("，");
+}
+
+function stringifyReplaceEntries(entries: Array<{ original: string; replacement: string }>) {
+  return entries
+    .map((entry) => `${entry.original.trim()} → ${entry.replacement.trim()}`)
+    .join("\n");
+}
+
+function getLiveOriginalNote(
+  result: RewriteResult,
+  collectRecordMap: Map<string, RewriteResult["originalNote"]>
+) {
+  const liveRecord = collectRecordMap.get(result.recordId);
+  if (!liveRecord) return result.originalNote;
+
+  return {
+    ...result.originalNote,
+    hasRewritten: liveRecord.hasRewritten ?? result.originalNote.hasRewritten,
+    rewriteDate: liveRecord.rewriteDate || result.originalNote.rewriteDate,
+  };
+}
+
+export default function RewriteModule() {
+  const {
+    rewriteResults,
+    updateRewriteResult,
+    deleteRewriteResults,
+    selectedRewriteIds,
+    toggleRewriteSelect,
+    selectAllRewriteIds,
+    deselectRewriteIds,
+    clearRewriteSelection,
+    addDraftRecord,
+    collectRecords,
+    setCollectRecords,
+  } = useAppStore();
+
+  const {
+    replaceLibraryEnabled,
+    setReplaceLibraryEnabled,
+    autoMergeExtractedEntries,
+    setAutoMergeExtractedEntries,
+    replaceEntriesByScope,
+    addReplaceEntry,
+    updateReplaceEntry,
+    removeReplaceEntry,
+    buildReplaceInfoString,
+    mergeExtractedEntries,
+  } = useRewriteSettingsStore();
+
+  const { buildBodyPrompt, buildTitlePrompt, buildCoverPrompt, extractReplacePrompt } = usePromptsSettingsStore();
+
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [pendingExtractedEntries, setPendingExtractedEntries] = useState<PendingExtractedEntriesByScope>(
+    createEmptyPendingExtractedEntries
+  );
+
+  const collectRecordMap = useMemo(
+    () =>
+      new Map(
+        collectRecords
+          .filter((record) => record.recordId)
+          .map((record) => [record.recordId!, record] as const)
+      ),
+    [collectRecords]
+  );
+
+  const existingEntriesByScope = useMemo(
+    () => ({
+      title: replaceEntriesByScope.title.map((entry) => ({
+        original: entry.original,
+        replacement: entry.replacement,
+      })),
+      body: replaceEntriesByScope.body.map((entry) => ({
+        original: entry.original,
+        replacement: entry.replacement,
+      })),
+      cover: replaceEntriesByScope.cover.map((entry) => ({
+        original: entry.original,
+        replacement: entry.replacement,
+      })),
+    }),
+    [replaceEntriesByScope]
+  );
+
+  const startRewrite = useCallback(
+    async (resultId: string) => {
+      const result = useAppStore.getState().rewriteResults.find((item) => item.id === resultId);
+      if (!result || (result.status !== "pending" && result.status !== "error")) return;
+
+      updateRewriteResult(resultId, { status: "processing" });
+
+      try {
+        const note = result.originalNote;
+        const titleReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("title") : "";
+        const bodyReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("body") : "";
+        const coverReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("cover") : "";
+
+        const originalCoverTextPromise =
+          note.cover && !note.coverText
+            ? callRewriteApi({
+                type: "extract-image-text",
+                imageUrl: note.cover,
+              })
+            : Promise.resolve({ result: note.coverText || "" });
+
+        const [titleRes, bodyRes, coverTextRes] = await Promise.all([
+          callRewriteApi({
+            type: "title",
+            content: sanitizeTitle(note.originalTitle || "") || note.originalBody || "",
+            replaceInfo: titleReplaceInfo,
+            systemPrompt: buildTitlePrompt(titleReplaceInfo),
+          }),
+          callRewriteApi({
+            type: "body",
+            content: note.originalBody || "",
+            replaceInfo: bodyReplaceInfo,
+            systemPrompt: buildBodyPrompt(bodyReplaceInfo),
+          }),
+          originalCoverTextPromise,
+        ]);
+
+        const rewrittenTitle = titleRes.result || "";
+        const rewrittenBody = normalizeRewrittenBody(bodyRes.result || "", note.originalBody || "");
+        const originalCoverText = coverTextRes.result || note.coverText || "";
+        const rewrittenCoverTextRes = await callRewriteApi({
+          type: "cover-text",
+          originalTitle: note.originalTitle || "",
+          originalBody: note.originalBody || "",
+          originalCoverText,
+          rewrittenTitle,
+          rewrittenBody,
+          replaceInfo: coverReplaceInfo,
+          systemPrompt: buildCoverPrompt(coverReplaceInfo),
+        });
+        const rewrittenCoverText = rewrittenCoverTextRes.result || "";
+
+        const randomTemplate = TEMPLATE_OPTIONS[Math.floor(Math.random() * TEMPLATE_OPTIONS.length)];
+        const coverPrompt = buildTemplateCoverPrompt(rewrittenCoverText, randomTemplate);
+        const coverRes = await callJimengGenerate({
+          prompt: coverPrompt,
+          ratio: "3:4",
+          resolution: "2k",
+          templateSrc: randomTemplate.src,
+        });
+
+        updateRewriteResult(resultId, {
+          status: "done",
+          errorMsg: undefined,
+          originalNote: {
+            ...note,
+            coverText: originalCoverText,
+          },
+          rewrittenTitle,
+          rewrittenBody,
+          rewrittenCover: coverRes.imageUrl || "",
+          rewrittenCoverText,
+          titleReplaceInfo,
+          bodyReplaceInfo,
+          coverReplaceInfo,
+        });
+      } catch (e: unknown) {
+        updateRewriteResult(resultId, {
+          status: "error",
+          errorMsg: e instanceof Error ? e.message : "二创失败",
+        });
+      }
+    },
+    [buildBodyPrompt, buildCoverPrompt, buildReplaceInfoString, buildTitlePrompt, replaceLibraryEnabled, updateRewriteResult]
+  );
+
+  useEffect(() => {
+    const pendingIds = rewriteResults
+      .filter((item) => item.status === "pending")
+      .map((item) => item.id);
+
+    pendingIds.forEach((id) => {
+      startRewrite(id);
+    });
+  }, [rewriteResults, startRewrite]);
+
+  async function handleSaveToDraft() {
+    const selected = rewriteResults.filter(
+      (result) => selectedRewriteIds.has(result.id) && result.status === "done"
+    );
+    if (selected.length === 0) return;
+
+    setSaving(true);
+    setSaveMsg("");
+
+    try {
+      const res = await fetch("/api/feishu/save-draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          results: selected,
+          extractReplacePromptTemplate: extractReplacePrompt,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "保存失败");
+
+      const persistedIds = new Set(
+        Array.isArray(data.persistedResultIds)
+          ? (data.persistedResultIds as unknown[]).filter(
+              (item): item is string => typeof item === "string"
+            )
+          : []
+      );
+      const failedResults = Array.isArray(data.failedResults)
+        ? (data.failedResults as Array<{ resultId?: unknown; error?: unknown }>).map((item) => ({
+            resultId: typeof item?.resultId === "string" ? item.resultId : "",
+            error: typeof item?.error === "string" ? item.error : "保存失败",
+          }))
+        : [];
+      const persistedResults = selected.filter((item) => persistedIds.has(item.id));
+      const persistedCount = persistedResults.length;
+      const failedCount = failedResults.length;
+
+      const extractedByScope = normalizeExtractedByScope(data.newlyExtractedByScope);
+      const autoMergedEntriesByScope: PendingExtractedEntriesByScope = autoMergeExtractedEntries
+        ? {
+            title: collectUniqueExtractedEntries(extractedByScope.title, existingEntriesByScope.title),
+            body: collectUniqueExtractedEntries(extractedByScope.body, existingEntriesByScope.body),
+            cover: collectUniqueExtractedEntries(extractedByScope.cover, existingEntriesByScope.cover),
+          }
+        : createEmptyPendingExtractedEntries();
+      const pendingCandidatesByScope: PendingExtractedEntriesByScope = autoMergeExtractedEntries
+        ? createEmptyPendingExtractedEntries()
+        : {
+            title: collectUniqueExtractedEntries(
+              extractedByScope.title,
+              [...existingEntriesByScope.title, ...pendingExtractedEntries.title]
+            ),
+            body: collectUniqueExtractedEntries(
+              extractedByScope.body,
+              [...existingEntriesByScope.body, ...pendingExtractedEntries.body]
+            ),
+            cover: collectUniqueExtractedEntries(
+              extractedByScope.cover,
+              [...existingEntriesByScope.cover, ...pendingExtractedEntries.cover]
+            ),
+          };
+      const autoMergedCount = countPendingExtractedEntries(autoMergedEntriesByScope);
+      const pendingCount = countPendingExtractedEntries(pendingCandidatesByScope);
+
+      if (autoMergedCount > 0) {
+        LIBRARY_SCOPES.forEach((item) => {
+          const scopeEntries = autoMergedEntriesByScope[item.scope];
+          if (scopeEntries.length === 0) return;
+          mergeExtractedEntries(item.scope, stringifyReplaceEntries(scopeEntries));
+        });
+        setPendingExtractedEntries((prev) => removeScopedEntries(prev, autoMergedEntriesByScope));
+      }
+
+      if (pendingCount > 0) {
+        setPendingExtractedEntries((prev) => ({
+          title: [...prev.title, ...pendingCandidatesByScope.title],
+          body: [...prev.body, ...pendingCandidatesByScope.body],
+          cover: [...prev.cover, ...pendingCandidatesByScope.cover],
+        }));
+      }
+
+      if (persistedResults.length > 0) {
+        const rewriteDate = new Date().toISOString().slice(0, 16).replace("T", " ");
+        persistedResults.forEach((result) => {
+          updateRewriteResult(result.id, {
+            originalNote: {
+              ...result.originalNote,
+              hasRewritten: true,
+              rewriteTitle: result.rewrittenTitle,
+              rewriteBody: result.rewrittenBody,
+              rewriteCover: result.rewrittenCover,
+              rewriteCoverText: result.rewrittenCoverText,
+              rewriteTags: buildDisplayTags(result),
+              rewriteTitleReplaceInfo: result.titleReplaceInfo,
+              rewriteBodyReplaceInfo: result.bodyReplaceInfo,
+              rewriteCoverReplaceInfo: result.coverReplaceInfo,
+              rewriteDate,
+            },
+          });
+        });
+
+        addDraftRecord({
+          id: Date.now().toString(),
+          savedAt: new Date().toISOString(),
+          rewriteResults: persistedResults,
+          feishuTableId: data.tableId,
+          feishuTableName: data.tableName,
+          targetLabel: data.tableName || "二创库",
+        });
+
+        deselectRewriteIds(Array.from(persistedIds));
+
+        try {
+          const recordsRes = await fetch("/api/feishu/records");
+          const recordsData = await recordsRes.json();
+          if (recordsRes.ok) {
+            const nextRecords = (recordsData.records || []) as Array<
+              RewriteResult["originalNote"]
+            >;
+            setCollectRecords(nextRecords);
+
+            const nextRecordMap = new Map(
+              nextRecords
+                .filter((record) => record.recordId)
+                .map((record) => [record.recordId!, record] as const)
+            );
+
+            persistedResults.forEach((result) => {
+              const liveRecord = nextRecordMap.get(result.recordId);
+              if (!liveRecord) return;
+
+              updateRewriteResult(result.id, {
+                originalNote: {
+                  ...result.originalNote,
+                  hasRewritten: liveRecord.hasRewritten ?? true,
+                  rewriteTitle: liveRecord.rewriteTitle || result.rewrittenTitle,
+                  rewriteBody: liveRecord.rewriteBody || result.rewrittenBody,
+                  rewriteCover: liveRecord.rewriteCover || result.rewrittenCover,
+                  rewriteCoverText:
+                    liveRecord.rewriteCoverText || result.rewrittenCoverText,
+                  rewriteTags: liveRecord.rewriteTags || buildDisplayTags(result),
+                  rewriteTitleReplaceInfo:
+                    liveRecord.rewriteTitleReplaceInfo || result.titleReplaceInfo,
+                  rewriteBodyReplaceInfo:
+                    liveRecord.rewriteBodyReplaceInfo || result.bodyReplaceInfo,
+                  rewriteCoverReplaceInfo:
+                    liveRecord.rewriteCoverReplaceInfo || result.coverReplaceInfo,
+                  rewriteDate: liveRecord.rewriteDate || rewriteDate,
+                },
+              });
+            });
+          }
+        } catch (refreshError) {
+          console.error("Refresh feishu records failed:", refreshError);
+        }
+      }
+
+      const collectUpdateWarning =
+        typeof data.collectUpdateWarning === "string" ? data.collectUpdateWarning.trim() : "";
+      let nextMessage = "";
+
+      if (persistedCount > 0) {
+        if (autoMergedCount > 0 && pendingCount > 0) {
+          nextMessage = `保存成功：已写入 ${persistedCount} 条，自动追加 ${autoMergedCount} 条到对应词库（${buildScopeCountLabel(autoMergedEntriesByScope)}），另有 ${pendingCount} 条待确认词条`;
+        } else if (autoMergedCount > 0) {
+          nextMessage = `保存成功：已写入 ${persistedCount} 条，并自动追加 ${autoMergedCount} 条到对应词库（${buildScopeCountLabel(autoMergedEntriesByScope)}）`;
+        } else if (pendingCount > 0) {
+          nextMessage = `保存成功：已写入 ${persistedCount} 条，发现 ${pendingCount} 条待确认词条`;
+        } else {
+          nextMessage = `保存成功：已写入 ${persistedCount} 条到二创库`;
+        }
+
+        if (failedCount > 0) {
+          const firstError = failedResults[0]?.error;
+          nextMessage = `${nextMessage}；失败 ${failedCount} 条，已保留勾选可直接重试${
+            firstError ? `（首条原因：${firstError}）` : ""
+          }`;
+        }
+
+        if (collectUpdateWarning) {
+          nextMessage = `${nextMessage}；爆款库状态同步稍后重试`;
+        }
+      } else if (failedCount > 0) {
+        nextMessage = `保存失败：0/${selected.length} 条写入成功`;
+        if (failedResults[0]?.error) {
+          nextMessage = `${nextMessage}，原因：${failedResults[0].error}`;
+        }
+      } else {
+        nextMessage = "保存失败";
+      }
+
+      setSaveMsg(nextMessage);
+
+      if (persistedCount > 0 && failedCount === 0) {
+        window.setTimeout(() => {
+          setSaveMsg("");
+        }, 2000);
+      } else if (persistedCount > 0) {
+        window.setTimeout(() => {
+          setSaveMsg("");
+        }, 4000);
+      }
+    } catch (e: unknown) {
+      setSaveMsg(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleDeleteSelected() {
+    if (selectedRewriteIds.size === 0) return;
+    const confirmed = window.confirm(`确认删除已选中的 ${selectedRewriteIds.size} 条二创记录吗？`);
+    if (!confirmed) return;
+    deleteRewriteResults(Array.from(selectedRewriteIds));
+    setSaveMsg(`已删除 ${selectedRewriteIds.size} 条二创记录`);
+    window.setTimeout(() => setSaveMsg(""), 2000);
+  }
+
+  function handleImportPendingEntries(scope: ReplaceLibraryScope) {
+    const scopeEntries = pendingExtractedEntries[scope].filter(
+      (entry) => entry.original.trim() && entry.replacement.trim()
+    );
+    if (scopeEntries.length === 0) {
+      setSaveMsg("待确认区没有可导入的有效词条");
+      window.setTimeout(() => setSaveMsg(""), 2000);
+      return;
+    }
+
+    mergeExtractedEntries(scope, stringifyReplaceEntries(scopeEntries));
+    setSaveMsg(
+      `已导入 ${scopeEntries.length} 条到${LIBRARY_SCOPES.find((item) => item.scope === scope)?.label}`
+    );
+    setPendingExtractedEntries((prev) => ({
+      ...prev,
+      [scope]: [],
+    }));
+    window.setTimeout(() => setSaveMsg(""), 2000);
+  }
+
+  function handleUpdatePendingEntry(
+    scope: ReplaceLibraryScope,
+    index: number,
+    patch: Partial<ReplaceEntryDraft>
+  ) {
+    setPendingExtractedEntries((prev) => ({
+      ...prev,
+      [scope]: prev[scope].map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, ...patch } : entry
+      ),
+    }));
+  }
+
+  function handleRemovePendingEntry(scope: ReplaceLibraryScope, index: number) {
+    setPendingExtractedEntries((prev) => ({
+      ...prev,
+      [scope]: prev[scope].filter((_, entryIndex) => entryIndex !== index),
+    }));
+  }
+
+  function handleDismissPendingEntries(scope: ReplaceLibraryScope) {
+    const scopeCount = pendingExtractedEntries[scope].length;
+    if (scopeCount === 0) return;
+    setSaveMsg(`已忽略 ${scopeCount} 条${LIBRARY_SCOPES.find((item) => item.scope === scope)?.label}待确认词条`);
+    setPendingExtractedEntries((prev) => ({
+      ...prev,
+      [scope]: [],
+    }));
+    window.setTimeout(() => setSaveMsg(""), 2000);
+  }
+
+  const doneCount = rewriteResults.filter((item) => item.status === "done").length;
+  const processingCount = rewriteResults.filter((item) => item.status === "processing").length;
+  const selectedDoneCount = rewriteResults.filter(
+    (item) => selectedRewriteIds.has(item.id) && item.status === "done"
+  ).length;
+  const allResultIds = rewriteResults.map((item) => item.id);
+  const allSelected = allResultIds.length > 0 && allResultIds.every((id) => selectedRewriteIds.has(id));
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="bg-white border-b border-gray-200 px-6 py-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-800">二创模块</h2>
+            <p className="text-sm text-gray-500 mt-0.5">
+              共 {rewriteResults.length} 条 · 已完成 {doneCount} 条
+              {processingCount > 0 && (
+                <span className="ml-2 text-orange-500">· {processingCount} 条生成中...</span>
+              )}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {rewriteResults.length > 0 && (
+              <button
+                onClick={() => {
+                  if (allSelected) {
+                    clearRewriteSelection();
+                    return;
+                  }
+                  selectAllRewriteIds(allResultIds);
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 text-gray-600 hover:text-gray-800 hover:border-gray-300 hover:bg-gray-50 text-sm rounded-lg font-medium transition-colors"
+              >
+                {allSelected ? "取消全选" : "全选当前列表"}
+              </button>
+            )}
+            {selectedRewriteIds.size > 0 && (
+              <span className="text-sm text-red-500 font-medium bg-red-50 px-2.5 py-1 rounded-full">
+                已选 {selectedRewriteIds.size} 条，可保存 {selectedDoneCount} 条
+              </span>
+            )}
+            {saveMsg && (
+              <span
+                className={clsx(
+                  "text-sm px-3 py-1 rounded-full",
+                  saveMsg.includes("失败") ? "text-red-600 bg-red-50" : "text-green-600 bg-green-50"
+                )}
+              >
+                {saveMsg}
+              </span>
+            )}
+            {selectedRewriteIds.size > 0 && (
+              <button
+                onClick={handleDeleteSelected}
+                className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 text-gray-600 hover:text-red-600 hover:border-red-200 hover:bg-red-50 text-sm rounded-lg font-medium transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                删除选中
+              </button>
+            )}
+            <button
+              onClick={handleSaveToDraft}
+              disabled={selectedDoneCount === 0 || saving}
+              className="flex items-center gap-1.5 px-4 py-2 bg-red-500 hover:bg-red-600 disabled:bg-gray-300 text-white text-sm rounded-lg font-medium transition-colors"
+            >
+              <Save className="w-4 h-4" />
+              {saving ? "保存中..." : "保存到二创库"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="shrink-0 border-b border-amber-200 bg-gradient-to-b from-amber-50 via-amber-50/95 to-white">
+        <div
+          role="button"
+          tabIndex={0}
+          className="w-full cursor-pointer px-6 py-3 transition-colors"
+          onClick={() => setLibraryOpen(!libraryOpen)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setLibraryOpen(!libraryOpen);
+            }
+          }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <BookOpen className="w-4 h-4 text-amber-600" />
+              <span className="text-sm font-semibold text-amber-700">替换词库</span>
+              {LIBRARY_SCOPES.map((item) => (
+                <span key={item.scope} className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                  {item.label} {replaceEntriesByScope[item.scope].length} 条
+                </span>
+              ))}
+              {replaceLibraryEnabled && (
+                <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-600">
+                  已启用
+                </span>
+              )}
+              <span
+                className={clsx(
+                  "rounded-full px-2 py-0.5 text-xs font-medium",
+                  autoMergeExtractedEntries ? "bg-sky-100 text-sky-600" : "bg-gray-100 text-gray-500"
+                )}
+              >
+                {autoMergeExtractedEntries ? "自动写入三份词库" : "自动学习关闭"}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <div
+                className="flex items-center gap-1.5 rounded-full bg-white/80 px-2 py-1 ring-1 ring-amber-100"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <span className="text-xs text-amber-600">启用</span>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setReplaceLibraryEnabled(!replaceLibraryEnabled)}
+                  onKeyDown={(e) => e.key === "Enter" && setReplaceLibraryEnabled(!replaceLibraryEnabled)}
+                  className="cursor-pointer text-amber-500 hover:text-amber-700 transition-colors"
+                >
+                  {replaceLibraryEnabled ? (
+                    <ToggleRight className="w-6 h-6 text-green-500" />
+                  ) : (
+                    <ToggleLeft className="w-6 h-6 text-gray-400" />
+                  )}
+                </div>
+              </div>
+              <span className="text-xs text-amber-500">{libraryOpen ? "收起" : "展开"}</span>
+              {libraryOpen ? (
+                <ChevronUp className="w-4 h-4 text-amber-500" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-amber-500" />
+              )}
+            </div>
+          </div>
+        </div>
+
+        {libraryOpen && (
+          <div className="px-6 pb-4">
+            <div className="overflow-hidden rounded-2xl border border-amber-200/80 bg-white/80 shadow-[0_10px_30px_rgba(245,158,11,0.08)]">
+              <div className="border-b border-amber-100 bg-amber-50/70 px-4 py-3">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-amber-700">
+                      <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-amber-200">
+                        具体词：公司A → 公司B
+                      </span>
+                      <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-amber-200">
+                        语义类别：地点 → 深圳
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs leading-5 text-amber-700/90">
+                      具体词用于只替换某个明确说法，比如公司名、岗位名、固定短语；
+                      语义类别用于按类型整体替换，比如地点、薪资、公司性质，能把同类表达统一改掉。
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-amber-200 bg-white/85 px-3 py-2 shadow-sm xl:w-[340px]">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-amber-700">保存后是否自动写入词库</p>
+                        <p className="mt-1 text-[11px] leading-5 text-amber-600/90">
+                          开启后，AI 提炼出的标题、正文、封面文案替换词会直接进入对应词库。
+                          关闭后，不会自动入库，而是先进入各自词库下方的待确认区，你可以先编辑、删除，再手动导入。
+                        </p>
+                      </div>
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setAutoMergeExtractedEntries(!autoMergeExtractedEntries)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setAutoMergeExtractedEntries(!autoMergeExtractedEntries);
+                          }
+                        }}
+                        className="cursor-pointer text-amber-500 transition-colors hover:text-amber-700"
+                      >
+                        {autoMergeExtractedEntries ? (
+                          <ToggleRight className="h-6 w-6 text-green-500" />
+                        ) : (
+                          <ToggleLeft className="h-6 w-6 text-gray-400" />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="max-h-[min(42vh,460px)] overflow-y-auto overscroll-contain px-4 py-4">
+                <div className="grid gap-4 xl:grid-cols-3">
+                  {LIBRARY_SCOPES.map((item) => {
+                    const scopePendingEntries = pendingExtractedEntries[item.scope];
+                    const scopePendingCount = scopePendingEntries.length;
+
+                    return (
+                    <div key={item.scope} className="rounded-2xl border border-amber-100 bg-white p-3">
+                      <div className="mb-3 flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-semibold text-amber-700">{item.label}</p>
+                            {!autoMergeExtractedEntries && (
+                              <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-600 ring-1 ring-sky-100">
+                                待确认 {scopePendingCount} 条
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-1 text-[11px] text-amber-600/90">{item.desc}</p>
+                        </div>
+                        <button
+                          onClick={() => addReplaceEntry(item.scope)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-dashed border-amber-300 px-2.5 py-1.5 text-xs text-amber-700 hover:border-amber-500 hover:bg-amber-50"
+                        >
+                          <Plus className="w-3 h-3" />
+                          添加
+                        </button>
+                      </div>
+
+                      <div className="space-y-2">
+                        {replaceEntriesByScope[item.scope].length === 0 && (
+                          <div className="rounded-xl border border-dashed border-amber-200 bg-amber-50/60 px-4 py-6 text-center text-xs text-amber-500">
+                            暂无词条
+                          </div>
+                        )}
+                        {replaceEntriesByScope[item.scope].map((entry) => (
+                          <div
+                            key={entry.id}
+                            className="grid gap-2 rounded-2xl border border-amber-100 bg-white p-2 sm:grid-cols-[minmax(0,1fr)_20px_minmax(0,1fr)_36px] sm:items-center"
+                          >
+                            <input
+                              type="text"
+                              placeholder="原词或类别"
+                              value={entry.original}
+                              onChange={(e) =>
+                                updateReplaceEntry(item.scope, entry.id, { original: e.target.value })
+                              }
+                              className="min-w-0 rounded-xl border border-amber-200 bg-amber-50/40 px-3 py-2 text-xs text-gray-700 placeholder:text-gray-300 focus:border-amber-400 focus:bg-white focus:outline-none"
+                            />
+                            <span className="hidden text-center text-xs text-amber-400 sm:block">→</span>
+                            <span className="text-[11px] font-medium text-amber-400 sm:hidden">替换为</span>
+                            <input
+                              type="text"
+                              placeholder="目标词"
+                              value={entry.replacement}
+                              onChange={(e) =>
+                                updateReplaceEntry(item.scope, entry.id, { replacement: e.target.value })
+                              }
+                              className="min-w-0 rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-gray-700 placeholder:text-gray-300 focus:border-amber-400 focus:outline-none"
+                            />
+                            <button
+                              onClick={() => removeReplaceEntry(item.scope, entry.id)}
+                              className="flex h-8 w-8 items-center justify-center justify-self-end rounded-full border border-transparent text-gray-300 hover:border-red-100 hover:bg-red-50 hover:text-red-400"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+
+                      {!autoMergeExtractedEntries && (
+                        <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50/40 p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <p className="text-xs font-semibold text-sky-700">待确认区</p>
+                              <p className="mt-1 text-[11px] leading-5 text-sky-700/85">
+                                保存后 AI 新提炼出来、但还没正式入库的词条会先放在这里。
+                                你可以先编辑、删除，再决定是否导入到 {item.label}。
+                              </p>
+                            </div>
+                            {scopePendingCount > 0 && (
+                              <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                  onClick={() => handleImportPendingEntries(item.scope)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-sky-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-sky-700 transition-colors hover:border-sky-400 hover:bg-sky-50"
+                                >
+                                  导入本组
+                                </button>
+                                <button
+                                  onClick={() => handleDismissPendingEntries(item.scope)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-gray-600 transition-colors hover:border-gray-300 hover:bg-gray-50"
+                                >
+                                  忽略本组
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="mt-3 space-y-2">
+                            {scopePendingCount === 0 && (
+                              <div className="rounded-xl border border-dashed border-sky-200 bg-white/80 px-4 py-5 text-center text-xs text-sky-500">
+                                暂无待确认词条
+                              </div>
+                            )}
+                            {scopePendingEntries.map((entry, index) => (
+                              <div
+                                key={`${item.scope}-pending-${index}`}
+                                className="grid gap-2 rounded-2xl border border-sky-100 bg-white p-2 sm:grid-cols-[minmax(0,1fr)_20px_minmax(0,1fr)_36px] sm:items-center"
+                              >
+                                <input
+                                  type="text"
+                                  placeholder="原词或类别"
+                                  value={entry.original}
+                                  onChange={(e) =>
+                                    handleUpdatePendingEntry(item.scope, index, {
+                                      original: e.target.value,
+                                    })
+                                  }
+                                  className="min-w-0 rounded-xl border border-sky-200 bg-sky-50/40 px-3 py-2 text-xs text-gray-700 placeholder:text-gray-300 focus:border-sky-400 focus:bg-white focus:outline-none"
+                                />
+                                <span className="hidden text-center text-xs text-sky-400 sm:block">→</span>
+                                <span className="text-[11px] font-medium text-sky-400 sm:hidden">替换为</span>
+                                <input
+                                  type="text"
+                                  placeholder="目标词"
+                                  value={entry.replacement}
+                                  onChange={(e) =>
+                                    handleUpdatePendingEntry(item.scope, index, {
+                                      replacement: e.target.value,
+                                    })
+                                  }
+                                  className="min-w-0 rounded-xl border border-sky-200 bg-white px-3 py-2 text-xs text-gray-700 placeholder:text-gray-300 focus:border-sky-400 focus:outline-none"
+                                />
+                                <button
+                                  onClick={() => handleRemovePendingEntry(item.scope, index)}
+                                  className="flex h-8 w-8 items-center justify-center justify-self-end rounded-full border border-transparent text-gray-300 hover:border-red-100 hover:bg-red-50 hover:text-red-400"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {replaceLibraryEnabled && (
+                        <div className="mt-3 rounded-xl border border-amber-100 bg-amber-50/40 p-3">
+                          <p className="mb-2 text-xs font-medium text-amber-700">当前二创提示词注入预览</p>
+                          <pre className="max-h-28 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-gray-600">
+                            {buildReplaceInfoString(item.scope) || "（当前无有效词条）"}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {rewriteResults.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+            <Sparkles className="w-12 h-12 mb-3 opacity-30" />
+            <p className="text-sm">请先在「爆款库」选择笔记并点击一键二创</p>
+          </div>
+        ) : (
+          <div className="space-y-3 px-3 py-3">
+            {rewriteResults.map((result) => (
+              <RewriteRow
+                key={result.id}
+                result={result}
+                originalNote={getLiveOriginalNote(result, collectRecordMap)}
+                selected={selectedRewriteIds.has(result.id)}
+                onToggleSelect={() => toggleRewriteSelect(result.id)}
+                onUpdate={(updates) => updateRewriteResult(result.id, updates)}
+                onRetry={() => startRewrite(result.id)}
+                onDelete={() => deleteRewriteResults([result.id])}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RewriteRow({
+  result,
+  originalNote,
+  selected,
+  onToggleSelect,
+  onUpdate,
+  onRetry,
+  onDelete,
+}: {
+  result: RewriteResult;
+  originalNote: RewriteResult["originalNote"];
+  selected: boolean;
+  onToggleSelect: () => void;
+  onUpdate: (updates: Partial<RewriteResult>) => void;
+  onRetry: () => void;
+  onDelete: () => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [editingBody, setEditingBody] = useState(false);
+  const [editingCoverText, setEditingCoverText] = useState(false);
+  const [editingOriginalTags, setEditingOriginalTags] = useState(false);
+  const [editingRewrittenTags, setEditingRewrittenTags] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [generatingCover, setGeneratingCover] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
+  const [editDialog, setEditDialog] = useState<{
+    prompt: string;
+    mode: ImageEditMode;
+    sourceImageSrc: string;
+    sourceImageLabel: string;
+  } | null>(null);
+
+  const note = originalNote;
+  const displayTitle = sanitizeTitle(note.originalTitle || "");
+  const originalTags = buildOriginalTags(result);
+  const rewrittenTags = buildDisplayTags(result);
+
+  function openCoverEditDialog(mode: ImageEditMode) {
+    setEditDialog({
+      prompt: result.rewrittenCoverText || "",
+      mode,
+      sourceImageSrc: result.rewrittenCover || "",
+      sourceImageLabel: "封面",
+    });
+  }
+
+  function openTemplateEditDialog(template: TemplateOption) {
+    setShowTemplates(false);
+    setEditDialog({
+      prompt: result.rewrittenCoverText || "",
+      mode: "image",
+      sourceImageSrc: template.src,
+      sourceImageLabel: `模板 ${template.id}`,
+    });
+  }
+
+  async function generateCoverFromTemplate(template: TemplateOption) {
+    if (!result.rewrittenCoverText || generatingCover) return;
+    setGeneratingCover(true);
+    setShowTemplates(false);
+    try {
+      const prompt = buildTemplateCoverPrompt(result.rewrittenCoverText, template);
+      const data = await callJimengGenerate({
+        prompt,
+        ratio: "3:4",
+        resolution: "2k",
+        templateSrc: template.src,
+      });
+      onUpdate({ rewrittenCover: data.imageUrl });
+    } catch (e: unknown) {
+      console.error("生成封面失败:", e);
+    } finally {
+      setGeneratingCover(false);
+    }
+  }
+
+  async function generateFromEditDialog() {
+    if (!editDialog || generatingCover) return;
+    setGeneratingCover(true);
+    try {
+      const prompt = editDialog.prompt.trim();
+      const data = await callJimengGenerate({
+        prompt,
+        ratio: "3:4",
+        resolution: "2k",
+        referenceImageSrc:
+          editDialog.mode === "image" ? editDialog.sourceImageSrc : "",
+      });
+      onUpdate({
+        rewrittenCover: data.imageUrl,
+      });
+      setEditDialog(null);
+    } catch (e: unknown) {
+      console.error("封面编辑生图失败:", e);
+    } finally {
+      setGeneratingCover(false);
+    }
+  }
+
+  return (
+    <>
+      <div
+        className={clsx(
+          "rounded-2xl border border-gray-200/80 bg-gradient-to-br from-white to-gray-50/50 px-4 py-3 shadow-[0_1px_3px_rgba(15,23,42,0.05)] transition-all duration-200",
+          "hover:border-gray-300/80 hover:shadow-[0_8px_24px_rgba(15,23,42,0.06)]",
+          selected && "border-red-200 bg-red-50/40 shadow-[0_10px_24px_rgba(239,68,68,0.08)]"
+        )}
+      >
+        <div className="flex items-center gap-3 mb-2">
+          <div className="flex-shrink-0 cursor-pointer" onClick={onToggleSelect}>
+            <div
+              className={clsx(
+                "w-5 h-5 rounded border-2 flex items-center justify-center",
+                selected ? "bg-red-500 border-red-500" : "border-gray-300 bg-white"
+              )}
+            >
+              {selected && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+            </div>
+          </div>
+
+          <StatusBadge status={result.status} saved={Boolean(note.hasRewritten)} />
+          {result.batchTotal > 1 && (
+            <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600 ring-1 ring-blue-100">
+              第 {result.batchIndex}/{result.batchTotal} 版
+            </span>
+          )}
+
+          <span className="flex-1 text-sm text-gray-600 truncate">{displayTitle}</span>
+
+          <button
+            onClick={() => {
+              const confirmed = window.confirm("确认删除这条二创记录吗？");
+              if (confirmed) onDelete();
+            }}
+            className="text-gray-300 hover:text-red-500 transition-colors"
+            title="删除"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+          >
+            {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+        </div>
+
+        {expanded && (
+          <div className="mt-3 border-t border-gray-200/70 pt-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-gray-50 rounded-xl p-3 space-y-2">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">封面</p>
+
+                <div className="relative aspect-[3/4] bg-gray-200 rounded-lg overflow-hidden w-24">
+                  {note.cover ? (
+                    <Image
+                      src={`/api/proxy-image?url=${encodeURIComponent(note.cover)}`}
+                      alt="原封面"
+                      fill
+                      sizes="96px"
+                      className="object-cover"
+                      unoptimized
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">无封面</div>
+                  )}
+                </div>
+
+                {note.coverText && (
+                  <div>
+                    <p className="text-xs text-gray-400 mb-0.5">封面文案</p>
+                    <p className="text-xs text-gray-700 whitespace-pre-wrap">{note.coverText}</p>
+                  </div>
+                )}
+
+                <div>
+                  <p className="text-xs text-gray-400 mb-0.5">标题</p>
+                  <p className="text-sm text-gray-800 font-medium">{note.originalTitle || "—"}</p>
+                </div>
+
+                <div>
+                  <p className="text-xs text-gray-400 mb-0.5">正文</p>
+                  <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">
+                    {note.originalBody || "—"}
+                  </p>
+                </div>
+
+                <EditableTagsField
+                  label="标签"
+                  tags={originalTags}
+                  editing={editingOriginalTags}
+                  onEdit={() => setEditingOriginalTags(true)}
+                  onSave={(nextTags) => {
+                    onUpdate({
+                      originalNote: {
+                        ...note,
+                        originalTags: nextTags,
+                      },
+                    });
+                    setEditingOriginalTags(false);
+                  }}
+                  onCancel={() => setEditingOriginalTags(false)}
+                  chipClassName="bg-blue-50 text-blue-500"
+                />
+              </div>
+
+              <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+                {result.status === "processing" && (
+                  <div className="flex items-center gap-2 py-8 justify-center text-gray-400">
+                    <div className="w-5 h-5 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-sm">AI 生成中...</span>
+                  </div>
+                )}
+
+                {result.status === "error" && (
+                  <div className="py-4 text-center">
+                    <p className="text-sm text-red-500 mb-2">{result.errorMsg}</p>
+                    <button onClick={onRetry} className="text-xs text-red-500 hover:underline">
+                      重试
+                    </button>
+                  </div>
+                )}
+
+                {result.status === "done" && (
+                  <>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                      二创封面
+                    </p>
+                    <div className="space-y-1">
+                      <div className="flex items-start gap-2">
+                        <div className="relative aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden w-24 flex-shrink-0 group">
+                          {generatingCover ? (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <div className="w-5 h-5 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                            </div>
+                          ) : result.rewrittenCover ? (
+                            <>
+                              <Image
+                                src={result.rewrittenCover}
+                                alt="二创封面"
+                                fill
+                                sizes="96px"
+                                className="object-cover"
+                                unoptimized
+                              />
+                              <HoverImageActions
+                                onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "二创封面预览" })}
+                                onEdit={() => openCoverEditDialog("text")}
+                              />
+                            </>
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs text-center px-1">
+                              未生成
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <label className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 cursor-pointer border border-gray-200 rounded px-2 py-1">
+                            <Upload className="w-3 h-3" />
+                            上传图片
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.currentTarget.value = "";
+                                if (!file) return;
+                                try {
+                                  const dataUrl = await readFileAsDataUrl(file);
+                                  onUpdate({ rewrittenCover: dataUrl });
+                                } catch (error) {
+                                  console.error("读取上传图片失败:", error);
+                                }
+                              }}
+                            />
+                          </label>
+                          <button
+                            onClick={() => setShowTemplates(!showTemplates)}
+                            disabled={!result.rewrittenCoverText || generatingCover}
+                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
+                          >
+                            <Sparkles className="w-3 h-3" />
+                            模板生图
+                          </button>
+                        </div>
+                      </div>
+
+                      {showTemplates && (
+                        <div className="mt-2 p-2 bg-gray-50 rounded-lg">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <p className="text-xs text-gray-500">选择模板</p>
+                            <button onClick={() => setShowTemplates(false)}>
+                              <X className="w-3.5 h-3.5 text-gray-400" />
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-5 gap-1.5">
+                            {TEMPLATE_OPTIONS.map((template) => (
+                              <button
+                                key={template.id}
+                                onClick={() => generateCoverFromTemplate(template)}
+                                className="relative aspect-[3/4] rounded overflow-hidden hover:ring-2 hover:ring-red-400 transition-all group"
+                              >
+                                <Image
+                                  src={template.src}
+                                  alt={`模板${template.id}`}
+                                  fill
+                                  sizes="80px"
+                                  className="object-cover"
+                                />
+                                <HoverImageActions
+                                  small
+                                  onPreview={() => setPreviewImage({ src: template.src, title: `模板 ${template.id}` })}
+                                  onEdit={() => openTemplateEditDialog(template)}
+                                />
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <EditableField
+                      label="二创封面文案"
+                      value={result.rewrittenCoverText}
+                      editing={editingCoverText}
+                      onEdit={() => setEditingCoverText(true)}
+                      onSave={(value) => {
+                        onUpdate({ rewrittenCoverText: value });
+                        setEditingCoverText(false);
+                      }}
+                      onCancel={() => setEditingCoverText(false)}
+                      multiline
+                    />
+
+                    <EditableField
+                      label="二创标题"
+                      value={result.rewrittenTitle}
+                      editing={editingTitle}
+                      onEdit={() => setEditingTitle(true)}
+                      onSave={(value) => {
+                        onUpdate({ rewrittenTitle: value });
+                        setEditingTitle(false);
+                      }}
+                      onCancel={() => setEditingTitle(false)}
+                      multiline={false}
+                    />
+
+                    <EditableField
+                      label="二创正文"
+                      value={result.rewrittenBody}
+                      editing={editingBody}
+                      onEdit={() => setEditingBody(true)}
+                      onSave={(value) => {
+                        onUpdate({ rewrittenBody: normalizeRewrittenBody(value, note.originalBody || "") });
+                        setEditingBody(false);
+                      }}
+                      onCancel={() => setEditingBody(false)}
+                      multiline
+                    />
+                  </>
+                )}
+
+                <EditableTagsField
+                  label="标签"
+                  tags={rewrittenTags}
+                  editing={editingRewrittenTags}
+                  onEdit={() => setEditingRewrittenTags(true)}
+                  onSave={(nextTags) => {
+                    onUpdate({ rewrittenTags: nextTags });
+                    setEditingRewrittenTags(false);
+                  }}
+                  onCancel={() => setEditingRewrittenTags(false)}
+                  chipClassName="bg-red-50 text-red-500"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {previewImage && (
+        <ImagePreviewModal
+          src={previewImage.src}
+          title={previewImage.title}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
+
+      {editDialog && (
+        <ImageEditModal
+          prompt={editDialog.prompt}
+          mode={editDialog.mode}
+          sourceImageSrc={editDialog.sourceImageSrc}
+          sourceImageLabel={editDialog.sourceImageLabel}
+          loading={generatingCover}
+          onPromptChange={(value) =>
+            setEditDialog((current) => (current ? { ...current, prompt: value } : current))
+          }
+          onModeChange={(mode) =>
+            setEditDialog((current) => (current ? { ...current, mode } : current))
+          }
+          onSourceImageChange={(value) =>
+            setEditDialog((current) =>
+              current
+                ? {
+                    ...current,
+                    sourceImageSrc: value,
+                    sourceImageLabel: current.sourceImageLabel === "封面" ? "封面" : "自定义垫图",
+                  }
+                : current
+            )
+          }
+          onClose={() => setEditDialog(null)}
+          onSubmit={generateFromEditDialog}
+        />
+      )}
+    </>
+  );
+}
+
+function HoverImageActions({
+  onPreview,
+  onEdit,
+  small = false,
+}: {
+  onPreview: () => void;
+  onEdit: () => void;
+  small?: boolean;
+}) {
+  return (
+    <div className="absolute inset-0 bg-black/40 opacity-0 transition-opacity group-hover:opacity-100 flex items-center justify-center gap-2">
+      <button
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onPreview();
+        }}
+        className={clsx(
+          "rounded-lg bg-white/90 text-gray-700 hover:bg-white",
+          small ? "px-2 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
+        )}
+      >
+        预览
+      </button>
+      <button
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onEdit();
+        }}
+        className={clsx(
+          "rounded-lg bg-white/90 text-gray-700 hover:bg-white",
+          small ? "px-2 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
+        )}
+      >
+        编辑
+      </button>
+    </div>
+  );
+}
+
+function ImagePreviewModal({
+  src,
+  title,
+  onClose,
+}: {
+  src: string;
+  title: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-6" onClick={onClose}>
+      <div
+        className="relative max-h-[90vh] max-w-[80vw] overflow-hidden rounded-2xl bg-white p-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          onClick={onClose}
+          className="absolute right-3 top-3 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80"
+        >
+          <X className="w-4 h-4" />
+        </button>
+        <p className="mb-3 text-sm font-medium text-gray-700">{title}</p>
+        <div className="relative h-[80vh] w-[60vh] max-w-[70vw]">
+          <Image src={src} alt={title} fill className="object-contain" unoptimized />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImageEditModal({
+  prompt,
+  mode,
+  sourceImageSrc,
+  sourceImageLabel,
+  loading,
+  onPromptChange,
+  onModeChange,
+  onSourceImageChange,
+  onClose,
+  onSubmit,
+}: {
+  prompt: string;
+  mode: ImageEditMode;
+  sourceImageSrc: string;
+  sourceImageLabel: string;
+  loading: boolean;
+  onPromptChange: (value: string) => void;
+  onModeChange: (mode: ImageEditMode) => void;
+  onSourceImageChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6" onClick={onClose}>
+      <div
+        className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-gray-800">封面生图</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              文生图直接使用提示词生成；图生图会基于当前垫图继续生成。
+            </p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="mt-4 inline-flex rounded-xl border border-gray-200 bg-gray-50 p-1">
+          <button
+            onClick={() => onModeChange("text")}
+            className={clsx(
+              "rounded-lg px-3 py-1.5 text-sm transition-colors",
+              mode === "text"
+                ? "bg-white text-red-600 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            )}
+          >
+            文生图
+          </button>
+          <button
+            onClick={() => onModeChange("image")}
+            className={clsx(
+              "rounded-lg px-3 py-1.5 text-sm transition-colors",
+              mode === "image"
+                ? "bg-white text-red-600 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            )}
+          >
+            图生图
+          </button>
+        </div>
+
+        {mode === "image" && (
+          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
+            <div className="flex items-start gap-3">
+              <div className="relative aspect-[3/4] w-24 flex-shrink-0 overflow-hidden rounded-lg bg-white">
+                {sourceImageSrc ? (
+                  <Image
+                    src={sourceImageSrc}
+                    alt={sourceImageLabel || "垫图"}
+                    fill
+                    sizes="96px"
+                    className="object-cover"
+                    unoptimized
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center px-2 text-center text-xs text-gray-400">
+                    暂无垫图
+                  </div>
+                )}
+              </div>
+              <div className="min-w-0 flex-1 space-y-2">
+                <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">
+                  <Upload className="w-3 h-3" />
+                  更换垫图
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.currentTarget.value = "";
+                      if (!file) return;
+                      try {
+                        const dataUrl = await readFileAsDataUrl(file);
+                        onSourceImageChange(dataUrl);
+                      } catch (error) {
+                        console.error("读取垫图失败:", error);
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <textarea
+          value={prompt}
+          onChange={(e) => onPromptChange(e.target.value)}
+          rows={6}
+          className="mt-4 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm leading-relaxed outline-none focus:border-red-400 focus:ring-1 focus:ring-red-200"
+          placeholder={
+            mode === "text"
+              ? "输入什么提示词，即梦就按这个提示词生成图片"
+              : "输入图生图提示词，基于当前垫图生成新图"
+          }
+        />
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50"
+          >
+            取消
+          </button>
+          <button
+            onClick={onSubmit}
+            disabled={!prompt.trim() || loading || (mode === "image" && !sourceImageSrc)}
+            className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:bg-gray-300"
+          >
+            {loading ? "生成中..." : mode === "text" ? "文生图生成" : "图生图生成"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditableTagsField({
+  label,
+  tags,
+  editing,
+  onEdit,
+  onSave,
+  onCancel,
+  chipClassName,
+}: {
+  label: string;
+  tags: string[];
+  editing: boolean;
+  onEdit: () => void;
+  onSave: (tags: string[]) => void;
+  onCancel: () => void;
+  chipClassName: string;
+}) {
+  const [draft, setDraft] = useState(formatTagDraft(tags));
+
+  useEffect(() => {
+    setDraft(formatTagDraft(tags));
+  }, [tags]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-0.5">
+        <p className="text-xs text-gray-400">{label}</p>
+        {!editing && (
+          <button
+            onClick={() => {
+              setDraft(formatTagDraft(tags));
+              onEdit();
+            }}
+            className="text-xs text-gray-400 hover:text-gray-600"
+          >
+            <Edit3 className="w-3 h-3" />
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <div className="space-y-1">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            className="w-full text-xs border border-gray-300 rounded p-2 resize-none focus:outline-none focus:border-red-400"
+            rows={3}
+            autoFocus
+            placeholder="输入标签"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={() => onSave(parseTagDraft(draft))}
+              className="text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600"
+            >
+              保存
+            </button>
+            <button
+              onClick={onCancel}
+              className="text-xs px-2 py-1 border border-gray-200 rounded hover:bg-gray-50"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {tags.map((tag) => (
+            <span
+              key={`${label}-${tag}`}
+              className={clsx("inline-flex items-center rounded-full px-2 py-0.5 text-xs", chipClassName)}
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-gray-800">—</p>
+      )}
+    </div>
+  );
+}
+
+function StatusBadge({
+  status,
+  saved = false,
+}: {
+  status: RewriteResult["status"];
+  saved?: boolean;
+}) {
+  if (status === "done" && saved) {
+    return (
+      <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-emerald-100 text-emerald-600">
+        已保存
+      </span>
+    );
+  }
+
+  const map = {
+    pending: { label: "等待中", cls: "bg-gray-100 text-gray-500" },
+    processing: { label: "生成中", cls: "bg-orange-100 text-orange-600 animate-pulse" },
+    done: { label: "已完成", cls: "bg-green-100 text-green-600" },
+    error: { label: "失败", cls: "bg-red-100 text-red-600" },
+  };
+  const { label, cls } = map[status];
+  return (
+    <span className={clsx("text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0", cls)}>
+      {label}
+    </span>
+  );
+}
+
+function EditableField({
+  label,
+  value,
+  editing,
+  onEdit,
+  onSave,
+  onCancel,
+  multiline,
+}: {
+  label: string;
+  value: string;
+  editing: boolean;
+  onEdit: () => void;
+  onSave: (value: string) => void;
+  onCancel: () => void;
+  multiline: boolean;
+}) {
+  const [draft, setDraft] = useState(value);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-0.5">
+        <p className="text-xs text-gray-400">{label}</p>
+        {!editing && (
+          <button
+            onClick={() => {
+              setDraft(value);
+              onEdit();
+            }}
+            className="text-xs text-gray-400 hover:text-gray-600"
+          >
+            <Edit3 className="w-3 h-3" />
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <div className="space-y-1">
+          {multiline ? (
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              className="w-full text-xs border border-gray-300 rounded p-2 resize-none focus:outline-none focus:border-red-400"
+              rows={6}
+              autoFocus
+            />
+          ) : (
+            <input
+              type="text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              className="w-full text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-400"
+              autoFocus
+            />
+          )}
+          <div className="flex gap-2">
+            <button
+              onClick={() => onSave(draft)}
+              className="text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600"
+            >
+              保存
+            </button>
+            <button
+              onClick={onCancel}
+              className="text-xs px-2 py-1 border border-gray-200 rounded hover:bg-gray-50"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-gray-800 whitespace-pre-wrap leading-relaxed max-h-32 overflow-y-auto">
+          {value || "—"}
+        </p>
+      )}
+    </div>
+  );
+}
