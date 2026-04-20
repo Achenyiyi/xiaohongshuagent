@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Sparkles,
   Save,
   Upload,
+  Square,
+  Play,
   ChevronDown,
   ChevronUp,
   Check,
@@ -27,7 +29,7 @@ import {
 } from "@/store/rewriteSettingsStore";
 import { usePromptsSettingsStore } from "@/store/promptsSettingsStore";
 import { dedupeTags, extractTagsFromText, sanitizeTitle } from "@/lib/xhs";
-import type { RewriteResult } from "@/types";
+import type { RewriteEditBaseline, RewriteResult } from "@/types";
 import Image from "next/image";
 
 type TemplateOption = {
@@ -94,11 +96,15 @@ const LIBRARY_SCOPES: Array<{ scope: ReplaceLibraryScope; label: string; desc: s
   { scope: "cover", label: "封面文案词库", desc: "只作用在封面文案生成" },
 ];
 
-async function callRewriteApi(payload: Record<string, unknown>) {
+const PUBLISH_PERSONA_OPTIONS = ["主播", "HR", "中立", "运营主管"] as const;
+
+async function callRewriteApi(payload: Record<string, unknown> & { signal?: AbortSignal }) {
+  const { signal, ...body } = payload;
   const res = await fetch("/api/ai/rewrite", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
+    signal,
   });
   const data = await res.json();
   if (!res.ok) {
@@ -122,11 +128,14 @@ async function callJimengGenerate(payload: {
   resolution?: string;
   templateSrc?: string;
   referenceImageSrc?: string;
+  signal?: AbortSignal;
 }) {
+  const { signal, ...body } = payload;
   const res = await fetch("/api/jimeng/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
+    signal,
   });
   const data = await res.json();
   if (!res.ok) {
@@ -343,7 +352,12 @@ function normalizeSavedTags(tags: string[] | undefined) {
 function buildRewriteSaveFingerprint(
   value: Pick<
     RewriteResult,
-    "rewrittenTitle" | "rewrittenBody" | "rewrittenCover" | "rewrittenCoverText" | "rewrittenTags"
+    | "rewrittenTitle"
+    | "rewrittenBody"
+    | "rewrittenCover"
+    | "rewrittenCoverText"
+    | "rewrittenTags"
+    | "publishPersona"
   >
 ) {
   return JSON.stringify({
@@ -352,6 +366,7 @@ function buildRewriteSaveFingerprint(
     rewrittenCover: normalizeSavedText(value.rewrittenCover),
     rewrittenCoverText: normalizeSavedText(value.rewrittenCoverText),
     rewrittenTags: normalizeSavedTags(value.rewrittenTags),
+    publishPersona: normalizeSavedText(value.publishPersona),
   });
 }
 
@@ -361,6 +376,7 @@ function buildSavedSnapshotFallbackFingerprint(note: RewriteResult["originalNote
     rewrittenBody: normalizeSavedText(note.rewriteBody),
     rewrittenCoverText: normalizeSavedText(note.rewriteCoverText),
     rewrittenTags: normalizeSavedTags(note.rewriteTags),
+    publishPersona: normalizeSavedText(note.publishPersona),
   });
 }
 
@@ -370,7 +386,70 @@ function buildCurrentResultFallbackFingerprint(result: RewriteResult) {
     rewrittenBody: normalizeSavedText(result.rewrittenBody),
     rewrittenCoverText: normalizeSavedText(result.rewrittenCoverText),
     rewrittenTags: normalizeSavedTags(buildDisplayTags(result)),
+    publishPersona: normalizeSavedText(result.publishPersona),
   });
+}
+
+function buildTrackedEditBaseline(value: RewriteEditBaseline): RewriteEditBaseline {
+  return {
+    rewrittenTitle: value.rewrittenTitle || "",
+    rewrittenBody: value.rewrittenBody || "",
+    rewrittenCover: value.rewrittenCover || "",
+    rewrittenCoverText: value.rewrittenCoverText || "",
+    rewrittenTags: [...(value.rewrittenTags || [])],
+    publishPersona: value.publishPersona || "",
+  };
+}
+
+function buildCurrentTrackedEditBaseline(
+  result: RewriteResult,
+  overrides: Partial<RewriteEditBaseline> = {}
+): RewriteEditBaseline {
+  return buildTrackedEditBaseline({
+    rewrittenTitle: overrides.rewrittenTitle ?? result.rewrittenTitle,
+    rewrittenBody: overrides.rewrittenBody ?? result.rewrittenBody,
+    rewrittenCover: overrides.rewrittenCover ?? result.rewrittenCover,
+    rewrittenCoverText: overrides.rewrittenCoverText ?? result.rewrittenCoverText,
+    rewrittenTags: overrides.rewrittenTags ?? result.rewrittenTags,
+    publishPersona: overrides.publishPersona ?? result.publishPersona,
+  });
+}
+
+function buildTrackedEditFingerprint(value: RewriteEditBaseline) {
+  return JSON.stringify(buildTrackedEditBaseline(value));
+}
+
+function mergeTrackedEditBaseline(
+  result: RewriteResult,
+  updates: Partial<RewriteEditBaseline>
+): RewriteEditBaseline {
+  return buildTrackedEditBaseline({
+    ...buildCurrentTrackedEditBaseline(result),
+    ...(result.editBaseline || {}),
+    ...updates,
+    rewrittenTags: updates.rewrittenTags ?? result.editBaseline?.rewrittenTags ?? result.rewrittenTags,
+    publishPersona:
+      updates.publishPersona ?? result.editBaseline?.publishPersona ?? result.publishPersona,
+  });
+}
+
+function isRewriteResultEdited(
+  result: RewriteResult,
+  overrides: Partial<RewriteEditBaseline> = {}
+) {
+  if (!result.editBaseline) return false;
+
+  return (
+    buildTrackedEditFingerprint(buildCurrentTrackedEditBaseline(result, overrides)) !==
+    buildTrackedEditFingerprint(result.editBaseline)
+  );
+}
+
+function isAbortError(error: unknown) {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
 }
 
 function isRewriteResultSaved(result: RewriteResult, note: RewriteResult["originalNote"]) {
@@ -382,6 +461,7 @@ function isRewriteResultSaved(result: RewriteResult, note: RewriteResult["origin
     rewrittenCover: result.rewrittenCover,
     rewrittenCoverText: result.rewrittenCoverText,
     rewrittenTags: buildDisplayTags(result),
+    publishPersona: result.publishPersona,
   });
 
   if (result.savedFingerprint) {
@@ -403,6 +483,7 @@ function getLiveOriginalNote(
     ...result.originalNote,
     hasRewritten: liveRecord.hasRewritten ?? result.originalNote.hasRewritten,
     rewriteDate: liveRecord.rewriteDate || result.originalNote.rewriteDate,
+    publishPersona: liveRecord.publishPersona || result.originalNote.publishPersona,
   };
 }
 
@@ -456,6 +537,7 @@ export default function RewriteModule() {
   const [pendingExtractedEntries, setPendingExtractedEntries] = useState<PendingExtractedEntriesByScope>(
     createEmptyPendingExtractedEntries
   );
+  const rewriteAbortControllersRef = useRef(new Map<string, AbortController>());
 
   const collectRecordMap = useMemo(
     () =>
@@ -522,16 +604,56 @@ export default function RewriteModule() {
     ]
   );
 
-  const ensureOriginalCoverText = useCallback(async (note: RewriteResult["originalNote"]) => {
-    if (note.cover && !note.coverText) {
-      const res = await callRewriteApi({
-        type: "extract-image-text",
-        imageUrl: note.cover,
+  const stopRewrite = useCallback(
+    (resultId: string) => {
+      const controller = rewriteAbortControllersRef.current.get(resultId);
+      if (controller) {
+        controller.abort();
+        rewriteAbortControllersRef.current.delete(resultId);
+      }
+
+      updateRewriteResult(resultId, {
+        status: "stopped",
+        errorMsg: undefined,
       });
-      return res.result || "";
-    }
-    return note.coverText || "";
-  }, []);
+    },
+    [updateRewriteResult]
+  );
+
+  const toggleRewriteProcessing = useCallback(
+    (resultId: string) => {
+      const current = useAppStore.getState().rewriteResults.find((item) => item.id === resultId);
+      if (!current) return;
+
+      if (current.status === "processing") {
+        stopRewrite(resultId);
+        return;
+      }
+
+      if (current.status === "stopped") {
+        updateRewriteResult(resultId, {
+          status: "pending",
+          errorMsg: undefined,
+        });
+      }
+    },
+    [stopRewrite, updateRewriteResult]
+  );
+
+  const ensureOriginalCoverText = useCallback(
+    async (note: RewriteResult["originalNote"], signal?: AbortSignal) => {
+      if (note.cover && !note.coverText) {
+        const res = await callRewriteApi({
+          type: "extract-image-text",
+          imageUrl: note.cover,
+          signal,
+        });
+        return res.result || "";
+      }
+      return note.coverText || "";
+    },
+    []
+  );
 
   const retryRewriteField = useCallback(
     async (resultId: string, field: RetryableRewriteField) => {
@@ -554,6 +676,9 @@ export default function RewriteModule() {
           updateRewriteResult(resultId, {
             rewrittenTitle: titleRes.result || "",
             titleReplaceInfo,
+            editBaseline: mergeTrackedEditBaseline(current, {
+              rewrittenTitle: titleRes.result || "",
+            }),
             errorMsg: undefined,
           });
           return;
@@ -572,6 +697,9 @@ export default function RewriteModule() {
           updateRewriteResult(resultId, {
             rewrittenBody: normalizeRewrittenBody(bodyRes.result || "", note.originalBody || ""),
             bodyReplaceInfo,
+            editBaseline: mergeTrackedEditBaseline(current, {
+              rewrittenBody: normalizeRewrittenBody(bodyRes.result || "", note.originalBody || ""),
+            }),
             errorMsg: undefined,
           });
           return;
@@ -598,6 +726,9 @@ export default function RewriteModule() {
           },
           rewrittenCoverText: coverTextRes.result || "",
           coverReplaceInfo,
+          editBaseline: mergeTrackedEditBaseline(current, {
+            rewrittenCoverText: coverTextRes.result || "",
+          }),
           errorMsg: undefined,
         });
       } catch (e: unknown) {
@@ -624,9 +755,17 @@ export default function RewriteModule() {
   const startRewrite = useCallback(
     async (resultId: string) => {
       const result = useAppStore.getState().rewriteResults.find((item) => item.id === resultId);
-      if (!result || (result.status !== "pending" && result.status !== "error")) return;
+      if (!result || !["pending", "error", "stopped"].includes(result.status)) return;
 
-      updateRewriteResult(resultId, { status: "processing" });
+      const existingController = rewriteAbortControllersRef.current.get(resultId);
+      if (existingController) {
+        existingController.abort();
+      }
+
+      const controller = new AbortController();
+      rewriteAbortControllersRef.current.set(resultId, controller);
+
+      updateRewriteResult(resultId, { status: "processing", errorMsg: undefined });
 
       try {
         const note = result.originalNote;
@@ -634,7 +773,7 @@ export default function RewriteModule() {
         const bodyReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("body") : "";
         const coverReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("cover") : "";
 
-        const originalCoverTextPromise = ensureOriginalCoverText(note);
+        const originalCoverTextPromise = ensureOriginalCoverText(note, controller.signal);
         const titlePromptPayload = buildRewritePromptPayload("title", titleReplaceInfo);
         const bodyPromptPayload = buildRewritePromptPayload("body", bodyReplaceInfo);
 
@@ -643,16 +782,25 @@ export default function RewriteModule() {
             type: "title",
             content: sanitizeTitle(note.originalTitle || "") || note.originalBody || "",
             replaceInfo: titleReplaceInfo,
+            signal: controller.signal,
             ...titlePromptPayload,
           }),
           callRewriteApi({
             type: "body",
             content: note.originalBody || "",
             replaceInfo: bodyReplaceInfo,
+            signal: controller.signal,
             ...bodyPromptPayload,
           }),
           originalCoverTextPromise,
         ]);
+
+        if (
+          controller.signal.aborted ||
+          rewriteAbortControllersRef.current.get(resultId) !== controller
+        ) {
+          return;
+        }
 
         const rewrittenTitle = titleRes.result || "";
         const rewrittenBody = normalizeRewrittenBody(bodyRes.result || "", note.originalBody || "");
@@ -665,8 +813,16 @@ export default function RewriteModule() {
           rewrittenTitle,
           rewrittenBody,
           replaceInfo: coverReplaceInfo,
+          signal: controller.signal,
           ...coverPromptPayload,
         });
+
+        if (
+          controller.signal.aborted ||
+          rewriteAbortControllersRef.current.get(resultId) !== controller
+        ) {
+          return;
+        }
         const rewrittenCoverText = rewrittenCoverTextRes.result || "";
 
         const randomTemplate = TEMPLATE_OPTIONS[Math.floor(Math.random() * TEMPLATE_OPTIONS.length)];
@@ -676,6 +832,23 @@ export default function RewriteModule() {
           ratio: "3:4",
           resolution: "2k",
           templateSrc: randomTemplate.src,
+          signal: controller.signal,
+        });
+
+        if (
+          controller.signal.aborted ||
+          rewriteAbortControllersRef.current.get(resultId) !== controller
+        ) {
+          return;
+        }
+
+        const nextEditBaseline = buildTrackedEditBaseline({
+          rewrittenTitle,
+          rewrittenBody,
+          rewrittenCover: coverRes.imageUrl || "",
+          rewrittenCoverText,
+          rewrittenTags: result.rewrittenTags,
+          publishPersona: result.publishPersona,
         });
 
         updateRewriteResult(resultId, {
@@ -692,12 +865,25 @@ export default function RewriteModule() {
           titleReplaceInfo,
           bodyReplaceInfo,
           coverReplaceInfo,
+          editBaseline: nextEditBaseline,
         });
       } catch (e: unknown) {
+        if (controller.signal.aborted || isAbortError(e)) {
+          return;
+        }
+
+        if (rewriteAbortControllersRef.current.get(resultId) !== controller) {
+          return;
+        }
+
         updateRewriteResult(resultId, {
           status: "error",
           errorMsg: e instanceof Error ? e.message : "二创失败",
         });
+      } finally {
+        if (rewriteAbortControllersRef.current.get(resultId) === controller) {
+          rewriteAbortControllersRef.current.delete(resultId);
+        }
       }
     },
     [
@@ -708,6 +894,14 @@ export default function RewriteModule() {
       updateRewriteResult,
     ]
   );
+
+  useEffect(() => {
+    const abortControllers = rewriteAbortControllersRef.current;
+    return () => {
+      abortControllers.forEach((controller) => controller.abort());
+      abortControllers.clear();
+    };
+  }, []);
 
   useEffect(() => {
     const pendingIds = rewriteResults
@@ -814,6 +1008,7 @@ export default function RewriteModule() {
               rewrittenCover: result.rewrittenCover,
               rewrittenCoverText: result.rewrittenCoverText,
               rewrittenTags: buildDisplayTags(result),
+              publishPersona: result.publishPersona,
             }),
             originalNote: {
               ...result.originalNote,
@@ -827,6 +1022,7 @@ export default function RewriteModule() {
               rewriteBodyReplaceInfo: result.bodyReplaceInfo,
               rewriteCoverReplaceInfo: result.coverReplaceInfo,
               rewriteDate,
+              publishPersona: result.publishPersona,
             },
           });
         });
@@ -878,6 +1074,7 @@ export default function RewriteModule() {
                   rewriteCoverReplaceInfo:
                     liveRecord.rewriteCoverReplaceInfo || result.coverReplaceInfo,
                   rewriteDate: liveRecord.rewriteDate || rewriteDate,
+                  publishPersona: liveRecord.publishPersona || result.publishPersona,
                 },
               });
             });
@@ -1380,17 +1577,26 @@ export default function RewriteModule() {
           </div>
         ) : (
           <div className="space-y-3 px-3 py-3">
-            {rewriteResults.map((result) => (
+            {rewriteResults.map((result, index) => (
               <RewriteRow
                 key={result.id}
+                sequenceNumber={index + 1}
                 result={result}
                 originalNote={getLiveOriginalNote(result, collectRecordMap)}
                 selected={selectedRewriteIds.has(result.id)}
                 onToggleSelect={() => toggleRewriteSelect(result.id)}
                 onUpdate={(updates) => updateRewriteResult(result.id, updates)}
                 onRetry={() => startRewrite(result.id)}
+                onToggleProcessing={() => toggleRewriteProcessing(result.id)}
                 onRetryField={(field) => retryRewriteField(result.id, field)}
-                onDelete={() => deleteRewriteResults([result.id])}
+                onDelete={() => {
+                  const controller = rewriteAbortControllersRef.current.get(result.id);
+                  if (controller) {
+                    controller.abort();
+                    rewriteAbortControllersRef.current.delete(result.id);
+                  }
+                  deleteRewriteResults([result.id]);
+                }}
               />
             ))}
           </div>
@@ -1401,21 +1607,25 @@ export default function RewriteModule() {
 }
 
 function RewriteRow({
+  sequenceNumber,
   result,
   originalNote,
   selected,
   onToggleSelect,
   onUpdate,
   onRetry,
+  onToggleProcessing,
   onRetryField,
   onDelete,
 }: {
+  sequenceNumber: number;
   result: RewriteResult;
   originalNote: RewriteResult["originalNote"];
   selected: boolean;
   onToggleSelect: () => void;
   onUpdate: (updates: Partial<RewriteResult>) => void;
   onRetry: () => void;
+  onToggleProcessing: () => void;
   onRetryField: (field: RetryableRewriteField) => Promise<void>;
   onDelete: () => void;
 }) {
@@ -1423,8 +1633,8 @@ function RewriteRow({
   const [editingTitle, setEditingTitle] = useState(false);
   const [editingBody, setEditingBody] = useState(false);
   const [editingCoverText, setEditingCoverText] = useState(false);
-  const [editingOriginalTags, setEditingOriginalTags] = useState(false);
   const [editingRewrittenTags, setEditingRewrittenTags] = useState(false);
+  const [draftOverrides, setDraftOverrides] = useState<Partial<RewriteEditBaseline>>({});
   const [showTemplates, setShowTemplates] = useState(false);
   const [generatingCover, setGeneratingCover] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
@@ -1444,7 +1654,33 @@ function RewriteRow({
   const displayTitle = sanitizeTitle(note.originalTitle || "");
   const originalTags = buildOriginalTags(result);
   const rewrittenTags = buildDisplayTags(result);
+  const selectedPublishPersona = (result.publishPersona || "").trim();
   const isSaved = isRewriteResultSaved(result, note);
+  const isEdited = isRewriteResultEdited(result, draftOverrides);
+  const sequenceLabel = sequenceNumber.toString().padStart(2, "0");
+
+  function setDraftOverride<K extends keyof RewriteEditBaseline>(
+    field: K,
+    value: RewriteEditBaseline[K]
+  ) {
+    setDraftOverrides((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
+  function clearDraftOverride(field: keyof RewriteEditBaseline) {
+    setDraftOverrides((current) => {
+      if (!(field in current)) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  }
+
+  function handlePublishPersonaSelect(value: string) {
+    onUpdate({ publishPersona: value });
+  }
 
   async function handleRetryField(field: RetryableRewriteField) {
     if (retryingFields[field]) return;
@@ -1541,7 +1777,18 @@ function RewriteRow({
             </div>
           </div>
 
+          <span
+            className="inline-flex min-w-11 items-center justify-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold tracking-[0.18em] text-amber-700"
+            title={`第 ${sequenceNumber} 条`}
+          >
+            #{sequenceLabel}
+          </span>
           <StatusBadge status={result.status} saved={isSaved} />
+          {isEdited && (
+            <span className="rounded-full bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-600 ring-1 ring-violet-100">
+              已编辑
+            </span>
+          )}
           {result.batchTotal > 1 && (
             <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600 ring-1 ring-blue-100">
               第 {result.batchIndex}/{result.batchTotal} 版
@@ -1550,6 +1797,25 @@ function RewriteRow({
 
           <span className="flex-1 text-sm text-gray-600 truncate">{displayTitle}</span>
 
+          {(result.status === "processing" || result.status === "stopped") && (
+            <button
+              onClick={onToggleProcessing}
+              className={clsx(
+                "transition-colors",
+                result.status === "processing"
+                  ? "text-amber-400 hover:text-amber-600"
+                  : "text-sky-400 hover:text-sky-600"
+              )}
+              title={result.status === "processing" ? "停止生成" : "重新生成"}
+              aria-label={result.status === "processing" ? "停止生成" : "重新生成"}
+            >
+              {result.status === "processing" ? (
+                <Square className="h-4 w-4 fill-current" />
+              ) : (
+                <Play className="h-4 w-4 fill-current" />
+              )}
+            </button>
+          )}
           <button
             onClick={() => {
               const confirmed = window.confirm("确认删除这条二创记录吗？");
@@ -1619,30 +1885,47 @@ function RewriteRow({
                   </p>
                 </div>
 
-                <EditableTagsField
-                  label="标签"
-                  tags={originalTags}
-                  editing={editingOriginalTags}
-                  onEdit={() => setEditingOriginalTags(true)}
-                  onSave={(nextTags) => {
-                    onUpdate({
-                      originalNote: {
-                        ...note,
-                        originalTags: nextTags,
-                      },
-                    });
-                    setEditingOriginalTags(false);
-                  }}
-                  onCancel={() => setEditingOriginalTags(false)}
-                  chipClassName="bg-blue-50 text-blue-500"
-                />
+                <div>
+                  <p className="mb-0.5 text-xs text-gray-400">标签</p>
+                  {originalTags.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {originalTags.map((tag) => (
+                        <span
+                          key={`original-tag-${tag}`}
+                          className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-500"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-800">—</p>
+                  )}
+                </div>
               </div>
 
               <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+                <div className="flex justify-end">
+                  <PublishPersonaRail
+                    options={PUBLISH_PERSONA_OPTIONS}
+                    value={selectedPublishPersona}
+                    onSelect={handlePublishPersonaSelect}
+                  />
+                </div>
+
                 {result.status === "processing" && (
                   <div className="flex items-center gap-2 py-8 justify-center text-gray-400">
                     <div className="w-5 h-5 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
                     <span className="text-sm">AI 生成中...</span>
+                  </div>
+                )}
+
+                {result.status === "stopped" && (
+                  <div className="py-4 text-center">
+                    <p className="mb-2 text-sm text-amber-500">已停止生成</p>
+                    <button onClick={onToggleProcessing} className="text-xs text-sky-500 hover:underline">
+                      继续生成
+                    </button>
                   </div>
                 )}
 
@@ -1759,13 +2042,21 @@ function RewriteRow({
                       value={result.rewrittenCoverText}
                       editing={editingCoverText}
                       retrying={retryingFields.coverText}
-                      onEdit={() => setEditingCoverText(true)}
+                      onEdit={() => {
+                        setDraftOverride("rewrittenCoverText", result.rewrittenCoverText);
+                        setEditingCoverText(true);
+                      }}
                       onRetry={() => handleRetryField("coverText")}
+                      onDraftChange={(value) => setDraftOverride("rewrittenCoverText", value)}
                       onSave={(value) => {
                         onUpdate({ rewrittenCoverText: value });
+                        clearDraftOverride("rewrittenCoverText");
                         setEditingCoverText(false);
                       }}
-                      onCancel={() => setEditingCoverText(false)}
+                      onCancel={() => {
+                        clearDraftOverride("rewrittenCoverText");
+                        setEditingCoverText(false);
+                      }}
                       multiline
                     />
 
@@ -1774,13 +2065,21 @@ function RewriteRow({
                       value={result.rewrittenTitle}
                       editing={editingTitle}
                       retrying={retryingFields.title}
-                      onEdit={() => setEditingTitle(true)}
+                      onEdit={() => {
+                        setDraftOverride("rewrittenTitle", result.rewrittenTitle);
+                        setEditingTitle(true);
+                      }}
                       onRetry={() => handleRetryField("title")}
+                      onDraftChange={(value) => setDraftOverride("rewrittenTitle", value)}
                       onSave={(value) => {
                         onUpdate({ rewrittenTitle: value });
+                        clearDraftOverride("rewrittenTitle");
                         setEditingTitle(false);
                       }}
-                      onCancel={() => setEditingTitle(false)}
+                      onCancel={() => {
+                        clearDraftOverride("rewrittenTitle");
+                        setEditingTitle(false);
+                      }}
                       multiline={false}
                     />
 
@@ -1789,13 +2088,21 @@ function RewriteRow({
                       value={result.rewrittenBody}
                       editing={editingBody}
                       retrying={retryingFields.body}
-                      onEdit={() => setEditingBody(true)}
+                      onEdit={() => {
+                        setDraftOverride("rewrittenBody", result.rewrittenBody);
+                        setEditingBody(true);
+                      }}
                       onRetry={() => handleRetryField("body")}
+                      onDraftChange={(value) => setDraftOverride("rewrittenBody", value)}
                       onSave={(value) => {
                         onUpdate({ rewrittenBody: normalizeRewrittenBody(value, note.originalBody || "") });
+                        clearDraftOverride("rewrittenBody");
                         setEditingBody(false);
                       }}
-                      onCancel={() => setEditingBody(false)}
+                      onCancel={() => {
+                        clearDraftOverride("rewrittenBody");
+                        setEditingBody(false);
+                      }}
                       multiline
                     />
                   </>
@@ -1805,12 +2112,20 @@ function RewriteRow({
                   label="标签"
                   tags={rewrittenTags}
                   editing={editingRewrittenTags}
-                  onEdit={() => setEditingRewrittenTags(true)}
+                  onEdit={() => {
+                    setDraftOverride("rewrittenTags", rewrittenTags);
+                    setEditingRewrittenTags(true);
+                  }}
+                  onDraftChange={(nextTags) => setDraftOverride("rewrittenTags", nextTags)}
                   onSave={(nextTags) => {
                     onUpdate({ rewrittenTags: nextTags });
+                    clearDraftOverride("rewrittenTags");
                     setEditingRewrittenTags(false);
                   }}
-                  onCancel={() => setEditingRewrittenTags(false)}
+                  onCancel={() => {
+                    clearDraftOverride("rewrittenTags");
+                    setEditingRewrittenTags(false);
+                  }}
                   chipClassName="bg-red-50 text-red-500"
                 />
               </div>
@@ -2077,11 +2392,49 @@ function ImageEditModal({
   );
 }
 
+function PublishPersonaRail({
+  options,
+  value,
+  onSelect,
+}: {
+  options: readonly string[];
+  value: string;
+  onSelect: (value: string) => void;
+}) {
+  return (
+    <div className="flex flex-col items-end gap-2">
+      {options.map((option, index) => {
+        const selected = option === value;
+
+        return (
+          <button
+            key={option}
+            type="button"
+            onClick={() => onSelect(option)}
+            className={clsx(
+              "rounded-l-full border px-3 py-1 text-xs font-medium transition-all duration-200",
+              "text-right shadow-sm",
+              selected
+                ? "min-w-[88px] border-red-300 bg-red-500 text-white shadow-[0_6px_18px_rgba(239,68,68,0.18)]"
+                : "min-w-[68px] border-red-100 bg-red-50 text-red-400 hover:min-w-[78px] hover:border-red-200 hover:bg-red-100"
+            )}
+            title={`设为${option}`}
+            style={{ marginRight: `${index * 2}px` }}
+          >
+            {option}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function EditableTagsField({
   label,
   tags,
   editing,
   onEdit,
+  onDraftChange,
   onSave,
   onCancel,
   chipClassName,
@@ -2090,6 +2443,7 @@ function EditableTagsField({
   tags: string[];
   editing: boolean;
   onEdit: () => void;
+  onDraftChange?: (tags: string[]) => void;
   onSave: (tags: string[]) => void;
   onCancel: () => void;
   chipClassName: string;
@@ -2120,7 +2474,11 @@ function EditableTagsField({
         <div className="space-y-1">
           <textarea
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              const nextDraft = e.target.value;
+              setDraft(nextDraft);
+              onDraftChange?.(parseTagDraft(nextDraft));
+            }}
             className="w-full text-xs border border-gray-300 rounded p-2 resize-none focus:outline-none focus:border-red-400"
             rows={3}
             autoFocus
@@ -2179,6 +2537,7 @@ function StatusBadge({
     processing: { label: "生成中", cls: "bg-orange-100 text-orange-600 animate-pulse" },
     done: { label: "已完成", cls: "bg-green-100 text-green-600" },
     error: { label: "失败", cls: "bg-red-100 text-red-600" },
+    stopped: { label: "已停止", cls: "bg-amber-100 text-amber-600" },
   };
   const { label, cls } = map[status];
   return (
@@ -2195,6 +2554,7 @@ function EditableField({
   retrying = false,
   onEdit,
   onRetry,
+  onDraftChange,
   onSave,
   onCancel,
   multiline,
@@ -2205,6 +2565,7 @@ function EditableField({
   retrying?: boolean;
   onEdit: () => void;
   onRetry?: () => void | Promise<void>;
+  onDraftChange?: (value: string) => void;
   onSave: (value: string) => void;
   onCancel: () => void;
   multiline: boolean;
@@ -2252,8 +2613,12 @@ function EditableField({
           {multiline ? (
             <textarea
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              className="w-full text-xs border border-gray-300 rounded p-2 resize-none focus:outline-none focus:border-red-400"
+              onChange={(e) => {
+                const nextDraft = e.target.value;
+                setDraft(nextDraft);
+                onDraftChange?.(nextDraft);
+              }}
+              className="min-h-[120px] w-full resize-y rounded border border-gray-300 p-2 text-xs focus:border-red-400 focus:outline-none"
               rows={6}
               autoFocus
             />
@@ -2261,7 +2626,11 @@ function EditableField({
             <input
               type="text"
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                const nextDraft = e.target.value;
+                setDraft(nextDraft);
+                onDraftChange?.(nextDraft);
+              }}
               className="w-full text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-400"
               autoFocus
             />

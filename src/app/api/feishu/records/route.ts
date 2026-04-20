@@ -23,6 +23,7 @@ type RewriteSnapshot = {
   rewriteCover: string;
   rewriteCoverText: string;
   rewriteTags: string[];
+  publishPersona: string;
 };
 
 /** 安全取数字 */
@@ -151,6 +152,7 @@ function buildRewriteSnapshot(fields: Record<string, unknown>): RewriteSnapshot 
     rewriteCover: toAttachmentUrl(fields["二创封面"]),
     rewriteCoverText: toStr(fields["二创封面文案"]),
     rewriteTags,
+    publishPersona: toStr(fields["发布人设"]),
   };
 }
 
@@ -283,6 +285,10 @@ export async function GET() {
           rewriteTagsFromCollect.length > 0
             ? rewriteTagsFromCollect
             : rewriteSnapshot?.rewriteTags || [],
+        publishPersona:
+          toStr(f["发布人设"]) ||
+          rewriteSnapshot?.publishPersona ||
+          "",
         hasRewritten: Boolean(f["已二创"]) || Boolean(rewriteSnapshot),
         // 标题和正文字段（实际字段名已确认）
         originalTitle: toStr(f["标题"]),

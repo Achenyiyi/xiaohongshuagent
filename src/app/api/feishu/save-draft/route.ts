@@ -29,6 +29,7 @@ const DASHSCOPE_BASE_URL = runtimeConfig.dashscope.baseUrl;
 const DASHSCOPE_TEXT_MODEL = runtimeConfig.dashscope.textModel;
 const REWRITE_TABLE_ID = runtimeConfig.feishu.rewriteTableId;
 const FIELD_TYPE_TEXT = 1;
+const FIELD_TYPE_SINGLE_SELECT = 3;
 const FIELD_TYPE_DATETIME = 5;
 const FIELD_TYPE_ATTACHMENT = 17;
 const COMBINED_REPLACE_INFO_FIELD_NAME = "二创替换信息";
@@ -45,6 +46,7 @@ const REWRITE_TABLE_FIELDS = [
   { field_name: "二创标题", type: FIELD_TYPE_TEXT },
   { field_name: "二创正文", type: FIELD_TYPE_TEXT },
   { field_name: "二创标签", type: FIELD_TYPE_TEXT },
+  { field_name: "发布人设", type: FIELD_TYPE_SINGLE_SELECT },
   { field_name: COMBINED_REPLACE_INFO_FIELD_NAME, type: FIELD_TYPE_TEXT },
   { field_name: "笔记链接", type: FIELD_TYPE_TEXT },
   { field_name: "源记录ID", type: FIELD_TYPE_TEXT },
@@ -478,6 +480,12 @@ async function ensureRewriteTable() {
     FIELD_TYPE_TEXT,
     "二创库字段「二创封面文案」当前不是文本字段，无法写入文字。请在飞书里把它改成单行文本或多行文本。"
   );
+  assertFieldTypeOrThrow(
+    fieldTypeMap,
+    "发布人设",
+    FIELD_TYPE_SINGLE_SELECT,
+    "二创库字段「发布人设」当前不是单选字段，无法写入人设。请在飞书里把它改成单选字段。"
+  );
   assertFieldTypeOrThrow(fieldTypeMap, "封面", FIELD_TYPE_ATTACHMENT);
   assertFieldTypeOrThrow(fieldTypeMap, "二创封面", FIELD_TYPE_ATTACHMENT);
 
@@ -529,6 +537,7 @@ function buildRewriteTableFields(params: {
   setIfFieldHasValue(fields, targetFieldTypeMap, "二创正文", result.rewrittenBody);
   setIfFieldHasValue(fields, targetFieldTypeMap, "二创标签", formatTagsForStorage(inheritedTags));
   setIfFieldHasValue(fields, targetFieldTypeMap, "二创封面文案", normalizedRewrittenCoverText);
+  setIfFieldHasValue(fields, targetFieldTypeMap, "发布人设", result.publishPersona);
   setIfFieldHasValue(
     fields,
     targetFieldTypeMap,
@@ -577,6 +586,7 @@ function buildCollectUpdateFields(
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创正文", result.rewrittenBody);
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创标签", formatTagsForStorage(inheritedTags));
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创封面文案", normalizedRewrittenCoverText);
+  setIfFieldHasValue(fields, collectFieldTypeMap, "发布人设", result.publishPersona);
   setIfFieldExists(fields, collectFieldTypeMap, "已二创", true);
 
   return fields;

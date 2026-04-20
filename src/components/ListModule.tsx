@@ -11,6 +11,50 @@ import type { FeishuCollectRecord, RewriteResult } from "@/types";
 import Image from "next/image";
 
 const PAGE_SIZE = 10;
+type SortField = "collectDate" | "likedCount" | "collectedCount" | "commentCount" | "shareCount";
+type SortDirection = "asc" | "desc";
+type SortState = Record<SortField, { enabled: boolean; direction: SortDirection }>;
+
+const SORT_FIELD_OPTIONS: Array<{ field: SortField; label: string }> = [
+  { field: "collectDate", label: "添加时间" },
+  { field: "likedCount", label: "点赞" },
+  { field: "collectedCount", label: "收藏" },
+  { field: "commentCount", label: "评论" },
+  { field: "shareCount", label: "转发" },
+];
+
+const DEFAULT_SORT_STATE: SortState = {
+  collectDate: { enabled: true, direction: "desc" },
+  likedCount: { enabled: false, direction: "desc" },
+  collectedCount: { enabled: false, direction: "desc" },
+  commentCount: { enabled: false, direction: "desc" },
+  shareCount: { enabled: false, direction: "desc" },
+};
+
+function parseCollectTimestamp(value: string | undefined) {
+  if (!value) return 0;
+
+  const normalized = value.trim().replace(/\//g, "-").replace(" ", "T");
+  const timestamp = new Date(normalized).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function getSortValue(record: FeishuCollectRecord, field: SortField) {
+  switch (field) {
+    case "collectDate":
+      return parseCollectTimestamp(record.collectDate);
+    case "likedCount":
+      return Number(record.likedCount || 0);
+    case "collectedCount":
+      return Number(record.collectedCount || 0);
+    case "commentCount":
+      return Number(record.commentCount || 0);
+    case "shareCount":
+      return Number(record.shareCount || 0);
+    default:
+      return 0;
+  }
+}
 
 function buildDisplayTags(record: FeishuCollectRecord) {
   return dedupeTags(record.originalTags || []);
@@ -35,9 +79,18 @@ function createRewriteResult(record: FeishuCollectRecord, batchIndex: number, ba
     rewrittenCover: "",
     rewrittenCoverText: "",
     rewrittenTags: inheritedTags,
+    publishPersona: record.publishPersona || "",
     titleReplaceInfo: "",
     bodyReplaceInfo: "",
     coverReplaceInfo: "",
+    editBaseline: {
+      rewrittenTitle: "",
+      rewrittenBody: "",
+      rewrittenCover: "",
+      rewrittenCoverText: "",
+      rewrittenTags: inheritedTags,
+      publishPersona: record.publishPersona || "",
+    },
     status: "pending",
   };
 }
@@ -60,10 +113,34 @@ export default function ListModule() {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [rewriting, setRewriting] = useState(false);
   const [batchCountMap, setBatchCountMap] = useState<Record<string, number>>({});
+  const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT_STATE);
   const initRef = useRef(false);
 
-  const totalPages = Math.max(1, Math.ceil(collectRecords.length / PAGE_SIZE));
-  const pageRecords = collectRecords.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const sortedRecords = useMemo(() => {
+    const hasActiveSort = SORT_FIELD_OPTIONS.some(({ field }) => sortState[field].enabled);
+    if (!hasActiveSort) return collectRecords;
+
+    return collectRecords
+      .map((record, index) => ({ record, index }))
+      .sort((left, right) => {
+        for (const { field } of SORT_FIELD_OPTIONS) {
+          const currentSort = sortState[field];
+          if (!currentSort.enabled) continue;
+
+          const leftValue = getSortValue(left.record, field);
+          const rightValue = getSortValue(right.record, field);
+          if (leftValue === rightValue) continue;
+
+          const baseCompare = leftValue < rightValue ? -1 : 1;
+          return currentSort.direction === "asc" ? baseCompare : -baseCompare;
+        }
+
+        return left.index - right.index;
+      })
+      .map(({ record }) => record);
+  }, [collectRecords, sortState]);
+  const totalPages = Math.max(1, Math.ceil(sortedRecords.length / PAGE_SIZE));
+  const pageRecords = sortedRecords.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const pageSelectableIds = pageRecords
     .filter((record) => record.recordId)
     .map((record) => record.recordId!);
@@ -78,6 +155,14 @@ export default function ListModule() {
     (sum, record) => sum + (batchCountMap[record.recordId!] || 1),
     0
   );
+
+  useEffect(() => {
+    setPage(1);
+  }, [sortState]);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages));
+  }, [totalPages]);
 
   const fetchRecords = useCallback(async () => {
     setLoading(true);
@@ -127,6 +212,26 @@ export default function ListModule() {
     setBatchCountMap((prev) => ({
       ...prev,
       [recordId]: Math.min(20, Math.max(1, nextValue || 1)),
+    }));
+  }
+
+  function toggleSortEnabled(field: SortField) {
+    setSortState((current) => ({
+      ...current,
+      [field]: {
+        ...current[field],
+        enabled: !current[field].enabled,
+      },
+    }));
+  }
+
+  function updateSortDirection(field: SortField, direction: SortDirection) {
+    setSortState((current) => ({
+      ...current,
+      [field]: {
+        ...current[field],
+        direction,
+      },
     }));
   }
 
@@ -182,16 +287,65 @@ export default function ListModule() {
         </div>
 
         {collectRecords.length > 0 && (
-          <div className="mt-2 flex items-center gap-3 text-sm text-gray-600">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={allPageSelected}
-                onChange={handleSelectCurrentPage}
-                disabled={pageSelectableIds.length === 0}
-              />
-              本页全选 ({pageSelectableIds.length} 条)
-            </label>
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-600">
+            <button
+              type="button"
+              onClick={handleSelectCurrentPage}
+              disabled={pageSelectableIds.length === 0}
+              className="flex items-center gap-2 disabled:text-gray-300 disabled:cursor-not-allowed"
+            >
+              <div
+                className={clsx(
+                  "w-5 h-5 rounded border-2 flex items-center justify-center",
+                  allPageSelected ? "bg-red-500 border-red-500" : "border-gray-300 bg-white",
+                  pageSelectableIds.length === 0 && !allPageSelected && "border-gray-200 bg-gray-100"
+                )}
+              >
+                {allPageSelected && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+              </div>
+              <span>本页全选</span>
+            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {SORT_FIELD_OPTIONS.map(({ field, label }) => {
+                const currentSort = sortState[field];
+
+                return (
+                  <div
+                    key={field}
+                    className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => toggleSortEnabled(field)}
+                      className="flex items-center"
+                    >
+                      <div
+                        className={clsx(
+                          "w-4 h-4 rounded border-2 flex items-center justify-center transition-colors",
+                          currentSort.enabled ? "bg-red-500 border-red-500" : "border-gray-300 bg-white"
+                        )}
+                      >
+                        {currentSort.enabled && (
+                          <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />
+                        )}
+                      </div>
+                    </button>
+                    <span className="text-xs font-medium text-gray-700">{label}</span>
+                    <select
+                      value={currentSort.direction}
+                      onChange={(event) =>
+                        updateSortDirection(field, event.target.value as SortDirection)
+                      }
+                      disabled={!currentSort.enabled}
+                      className="rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 disabled:bg-gray-100 disabled:text-gray-300"
+                    >
+                      <option value="desc">倒序</option>
+                      <option value="asc">正序</option>
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
             {selectedRecordIds.size > 0 && (
               <button
                 onClick={clearRecordSelection}

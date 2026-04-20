@@ -41,6 +41,7 @@ export interface FeishuCollectRecord {
   rewriteCover?: string; // 二创封面
   rewriteCoverText?: string; // 二创封面文案
   rewriteTags?: string[]; // 二创标签
+  publishPersona?: string; // 发布人设
   hasRewritten?: boolean; // 已二创（复选框）
   // 原始笔记内容（在飞书不存储，仅内存用）
   originalTitle?: string;
@@ -50,6 +51,15 @@ export interface FeishuCollectRecord {
 }
 
 // 二创结果
+export interface RewriteEditBaseline {
+  rewrittenTitle: string;
+  rewrittenBody: string;
+  rewrittenCover: string;
+  rewrittenCoverText: string;
+  rewrittenTags: string[];
+  publishPersona: string;
+}
+
 export interface RewriteResult {
   id: string;
   recordId: string;
@@ -61,11 +71,13 @@ export interface RewriteResult {
   rewrittenCover: string; // 生成的封面图URL
   rewrittenCoverText: string;
   rewrittenTags: string[];
+  publishPersona: string;
   titleReplaceInfo: string; // 本次标题生成实际使用的替换信息
   bodyReplaceInfo: string; // 本次正文生成实际使用的替换信息
   coverReplaceInfo: string; // 本次封面文案生成实际使用的替换信息
+  editBaseline?: RewriteEditBaseline; // 记录 AI 初始结果，用于判断是否被人工修改
   savedFingerprint?: string; // 当前版本最近一次成功保存的指纹
-  status: 'pending' | 'processing' | 'done' | 'error';
+  status: 'pending' | 'processing' | 'done' | 'error' | 'stopped';
   errorMsg?: string;
 }
 

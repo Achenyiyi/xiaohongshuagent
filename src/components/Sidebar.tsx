@@ -45,10 +45,31 @@ export default function Sidebar() {
     <aside className="w-1/4 min-w-[220px] max-w-[280px] bg-gray-900 flex flex-col h-full shadow-xl">
       {/* Logo区域 */}
       <div className="px-5 py-5 border-b border-gray-700">
-        <div>
-          <div>
-            <h1 className="text-white font-bold text-sm leading-tight">小红书内容智能体</h1>
-            <p className="text-gray-400 text-xs">采集 · 二创</p>
+        <div className="relative overflow-hidden rounded-2xl border border-orange-400/20 bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.24),_transparent_34%),linear-gradient(135deg,_rgba(17,24,39,0.98),_rgba(15,23,42,0.94))] px-4 py-4 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
+          <div className="absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-orange-200/70 to-transparent" />
+          <div className="absolute -right-10 -top-12 h-28 w-28 rounded-full bg-orange-400/10 blur-2xl" />
+          <div className="relative">
+            <div className="relative inline-block">
+              <span
+                aria-hidden="true"
+                className="absolute inset-0 translate-x-[2px] translate-y-[4px] text-[31px] font-black tracking-[0.18em] text-orange-500/25 blur-[2px]"
+                style={{ fontFamily: '"STKaiti","KaiTi","DFKai-SB","Microsoft YaHei",serif' }}
+              >
+                剽之有道
+              </span>
+              <h1
+                className="relative text-[31px] font-black leading-none tracking-[0.18em] text-transparent bg-clip-text bg-gradient-to-r from-orange-50 via-amber-200 to-orange-300 [transform:skewX(-8deg)]"
+                style={{ fontFamily: '"STKaiti","KaiTi","DFKai-SB","Microsoft YaHei",serif' }}
+              >
+                剽之有道
+              </h1>
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <span className="h-px flex-1 bg-gradient-to-r from-orange-400/80 to-transparent" />
+              <p className="rounded-full border border-orange-300/25 bg-white/5 px-2.5 py-1 text-[10px] font-medium tracking-[0.34em] text-orange-100/80 backdrop-blur-sm">
+                采集 · 二创
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -87,7 +108,7 @@ export default function Sidebar() {
 
       {/* 底部版本信息 */}
       <div className="px-5 py-3 border-t border-gray-700">
-        <p className="text-gray-600 text-xs text-center">v1.0.0 · 内容运营助手</p>
+        <p className="text-gray-600 text-xs text-center">精深求索内容运营助手</p>
       </div>
     </aside>
   );
