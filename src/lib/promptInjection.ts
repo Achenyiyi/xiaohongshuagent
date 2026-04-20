@@ -1,6 +1,21 @@
 import { PROHIBITED_WORDS } from "@/lib/prompts";
 
 const DEFAULT_REPLACE_INFO_TEXT = "暂无替换信息，请根据笔记内容进行通用改写";
+const REPLACE_INFO_VARIABLE = "{{REPLACE_INFO}}";
+const PROHIBITED_WORDS_VARIABLE = "{{PROHIBITED_WORDS}}";
+const ORIGINAL_AND_REWRITTEN_VARIABLE = "{{ORIGINAL_AND_REWRITTEN}}";
+
+function replaceTemplateVariableIfPresent(
+  template: string,
+  variableName: string,
+  injectedContent: string
+) {
+  if (!template.includes(variableName)) {
+    return template;
+  }
+
+  return template.split(variableName).join(injectedContent);
+}
 
 function injectTemplateVariable(
   template: string,
@@ -20,7 +35,7 @@ function injectTemplateVariable(
 export function injectReplaceInfo(template: string, replaceInfo: string) {
   return injectTemplateVariable(
     template,
-    "{{REPLACE_INFO}}",
+    REPLACE_INFO_VARIABLE,
     replaceInfo || DEFAULT_REPLACE_INFO_TEXT,
     "## 替换信息"
   );
@@ -29,10 +44,26 @@ export function injectReplaceInfo(template: string, replaceInfo: string) {
 export function injectProhibitedWords(template: string) {
   return injectTemplateVariable(
     template,
-    "{{PROHIBITED_WORDS}}",
+    PROHIBITED_WORDS_VARIABLE,
     PROHIBITED_WORDS,
     "## 严禁包含的违禁词"
   );
+}
+
+export function hasReplaceInfoPlaceholder(template: string) {
+  return template.includes(REPLACE_INFO_VARIABLE);
+}
+
+export function replaceReplaceInfoIfPresent(template: string, replaceInfo: string) {
+  return replaceTemplateVariableIfPresent(
+    template,
+    REPLACE_INFO_VARIABLE,
+    replaceInfo || DEFAULT_REPLACE_INFO_TEXT
+  );
+}
+
+export function replaceProhibitedWordsIfPresent(template: string) {
+  return replaceTemplateVariableIfPresent(template, PROHIBITED_WORDS_VARIABLE, PROHIBITED_WORDS);
 }
 
 export function buildOriginalAndRewrittenBlock(
@@ -55,8 +86,24 @@ export function injectOriginalAndRewritten(
 ) {
   return injectTemplateVariable(
     template,
-    "{{ORIGINAL_AND_REWRITTEN}}",
+    ORIGINAL_AND_REWRITTEN_VARIABLE,
     buildOriginalAndRewrittenBlock(original, rewritten),
     "## 原文与二创内容"
+  );
+}
+
+export function hasOriginalAndRewrittenPlaceholder(template: string) {
+  return template.includes(ORIGINAL_AND_REWRITTEN_VARIABLE);
+}
+
+export function replaceOriginalAndRewrittenIfPresent(
+  template: string,
+  original: { title: string; body: string; coverText: string },
+  rewritten: { title: string; body: string; coverText: string }
+) {
+  return replaceTemplateVariableIfPresent(
+    template,
+    ORIGINAL_AND_REWRITTEN_VARIABLE,
+    buildOriginalAndRewrittenBlock(original, rewritten)
   );
 }

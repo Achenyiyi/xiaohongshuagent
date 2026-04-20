@@ -11,6 +11,60 @@ const DASHSCOPE_API_KEY = runtimeConfig.dashscope.apiKey;
 const DASHSCOPE_BASE_URL = runtimeConfig.dashscope.baseUrl;
 const DASHSCOPE_TEXT_MODEL = runtimeConfig.dashscope.textModel;
 const DASHSCOPE_VISION_MODEL = runtimeConfig.dashscope.visionModel;
+type PromptMode = "default" | "custom";
+
+function normalizePromptMode(value: unknown): PromptMode {
+  return value === "custom" ? "custom" : "default";
+}
+
+function buildPromptBlock(label: string, content: string) {
+  return `【${label}】\n${content || "（空）"}`;
+}
+
+function buildCustomRewriteUserContent(args: {
+  type: "title" | "body" | "cover-text";
+  content?: string;
+  replaceInfo?: string;
+  promptIncludesReplaceInfo: boolean;
+  originalTitle?: string;
+  originalBody?: string;
+  originalCoverText?: string;
+  rewrittenTitle?: string;
+  rewrittenBody?: string;
+}) {
+  const sections: string[] = [];
+
+  if (args.type === "title") {
+    sections.push(buildPromptBlock("原始标题", args.content || ""));
+    if (!args.promptIncludesReplaceInfo && args.replaceInfo) {
+      sections.push(buildPromptBlock("替换关键词", args.replaceInfo));
+    }
+    sections.push("直接输出最终标题，不要解释。");
+    return sections.join("\n\n");
+  }
+
+  if (args.type === "body") {
+    sections.push(buildPromptBlock("原笔记正文", args.content || ""));
+    if (!args.promptIncludesReplaceInfo && args.replaceInfo) {
+      sections.push(buildPromptBlock("替换关键词", args.replaceInfo));
+    }
+    sections.push("直接输出最终改写后的正文，不要解释。");
+    return sections.join("\n\n");
+  }
+
+  sections.push(buildPromptBlock("原始标题", args.originalTitle || ""));
+  sections.push(buildPromptBlock("原始正文", args.originalBody || ""));
+  sections.push(
+    buildPromptBlock("原始封面文案", args.originalCoverText || "（无封面文案，请从标题和正文提炼）")
+  );
+  sections.push(buildPromptBlock("当前二创标题", args.rewrittenTitle || ""));
+  sections.push(buildPromptBlock("当前二创正文", args.rewrittenBody || ""));
+  if (!args.promptIncludesReplaceInfo && args.replaceInfo) {
+    sections.push(buildPromptBlock("替换关键词", args.replaceInfo));
+  }
+  sections.push("直接输出最终封面文案，不要解释。");
+  return sections.join("\n\n");
+}
 
 /**
  * 调用 DashScope（阿里云）文本模型
@@ -58,13 +112,25 @@ export async function POST(req: NextRequest) {
       rewrittenTitle,
       rewrittenBody,
       systemPrompt: customSystemPrompt, // 客户端传入的自定义提示词（可选）
+      promptMode: rawPromptMode,
+      promptIncludesReplaceInfo = false,
     } = await req.json();
+    const promptMode = normalizePromptMode(rawPromptMode);
 
     if (type === "title") {
       const systemPrompt = customSystemPrompt || buildTitleRewriteSystemPrompt();
+      const userContent =
+        promptMode === "custom"
+          ? buildCustomRewriteUserContent({
+              type,
+              content,
+              replaceInfo,
+              promptIncludesReplaceInfo,
+            })
+          : `请对以下标题进行二创优化：\n${content}`;
       const result = await callDashScope(
         systemPrompt,
-        `请对以下标题进行二创优化：\n${content}`,
+        userContent,
         DASHSCOPE_TEXT_MODEL
       );
       return NextResponse.json({ result: result.trim() });
@@ -72,9 +138,18 @@ export async function POST(req: NextRequest) {
 
     if (type === "body") {
       const systemPrompt = customSystemPrompt || buildBodyRewriteSystemPrompt(replaceInfo || "");
+      const userContent =
+        promptMode === "custom"
+          ? buildCustomRewriteUserContent({
+              type,
+              content,
+              replaceInfo,
+              promptIncludesReplaceInfo,
+            })
+          : `以下是参考文案，请进行仿写：\n\n${content}`;
       const result = await callDashScope(
         systemPrompt,
-        `以下是参考文案，请进行仿写：\n\n${content}`,
+        userContent,
         DASHSCOPE_TEXT_MODEL
       );
       return NextResponse.json({ result: result.trim() });
@@ -90,15 +165,28 @@ export async function POST(req: NextRequest) {
 
     if (type === "cover-text") {
       const systemPrompt = customSystemPrompt || buildCoverRewriteSystemPrompt(replaceInfo || "");
+      const userContent =
+        promptMode === "custom"
+          ? buildCustomRewriteUserContent({
+              type,
+              replaceInfo,
+              promptIncludesReplaceInfo,
+              originalTitle,
+              originalBody,
+              originalCoverText,
+              rewrittenTitle,
+              rewrittenBody,
+            })
+          : [
+              `原始标题：${originalTitle || ""}`,
+              `原始正文：${originalBody || ""}`,
+              `原始封面文案：${originalCoverText || "（无封面文案，请从二创标题和正文提炼）"}`,
+              `二创标题：${rewrittenTitle || ""}`,
+              `二创正文：${rewrittenBody || ""}`,
+            ].join("\n");
       const raw = await callDashScope(
         systemPrompt,
-        [
-          `原始标题：${originalTitle || ""}`,
-          `原始正文：${originalBody || ""}`,
-          `原始封面文案：${originalCoverText || "（无封面文案，请从二创标题和正文提炼）"}`,
-          `二创标题：${rewrittenTitle || ""}`,
-          `二创正文：${rewrittenBody || ""}`,
-        ].join("\n"),
+        userContent,
         DASHSCOPE_TEXT_MODEL
       );
       // 解析结构化输出：主标题 + 副标题

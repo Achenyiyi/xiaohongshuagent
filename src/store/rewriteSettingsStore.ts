@@ -155,8 +155,6 @@ export const useRewriteSettingsStore = create<RewriteSettingsState>()(
       resetToPresets: () =>
         set({
           replaceEntriesByScope: createDefaultLibraries(),
-          replaceLibraryEnabled: true,
-          autoMergeExtractedEntries: false,
         }),
 
       buildReplaceInfoString: (scope) => stringifyEntries(get().replaceEntriesByScope[scope]),

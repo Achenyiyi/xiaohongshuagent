@@ -15,6 +15,7 @@ interface PromptSection {
   key: "bodyRewritePrompt" | "titleRewritePrompt" | "coverRewritePrompt" | "extractReplacePrompt";
   label: string;
   desc: string;
+  helper: string;
   placeholder: string;
   defaultValue: string;
   variables: { name: string; desc: string }[];
@@ -25,43 +26,51 @@ const SECTIONS: PromptSection[] = [
     key: "bodyRewritePrompt",
     label: "正文二创提示词",
     desc: "控制 AI 如何对笔记正文进行仿写改写",
-    placeholder: "输入正文二创的系统提示词...",
+    helper:
+      "可以直接写自然语言规则，不用保留 {{...}}。保存后若该项已修改，会进入直通模式：默认模板规则不再追加，系统只自动提供原文和替换词库。",
+    placeholder: "直接写你希望 AI 如何改写正文，例如：分析爆款结构，然后原样输出...",
     defaultValue: DEFAULT_BODY_REWRITE_PROMPT,
     variables: [
-      { name: "{{REPLACE_INFO}}", desc: "正文替换词库，自动注入" },
-      { name: "{{PROHIBITED_WORDS}}", desc: "违禁词列表，自动注入" },
+      { name: "{{REPLACE_INFO}}", desc: "可选：想指定插入位置时再用" },
+      { name: "{{PROHIBITED_WORDS}}", desc: "可选：想显式引用违禁词时再用" },
     ],
   },
   {
     key: "titleRewritePrompt",
     label: "标题二创提示词",
     desc: "控制 AI 如何生成爆款标题",
-    placeholder: "输入标题二创的系统提示词...",
+    helper:
+      "可以直接写自然语言规则，不用保留 {{...}}。保存后若该项已修改，会进入直通模式：默认模板规则不再追加，系统只自动提供原标题和替换词库。",
+    placeholder: "直接写你希望 AI 如何生成标题，例如：保留原意，分析爆款结构后输出 1 个标题...",
     defaultValue: DEFAULT_TITLE_REWRITE_PROMPT,
     variables: [
-      { name: "{{REPLACE_INFO}}", desc: "标题替换词库，自动注入" },
-      { name: "{{PROHIBITED_WORDS}}", desc: "违禁词列表，自动注入" },
+      { name: "{{REPLACE_INFO}}", desc: "可选：想指定插入位置时再用" },
+      { name: "{{PROHIBITED_WORDS}}", desc: "可选：想显式引用违禁词时再用" },
     ],
   },
   {
     key: "coverRewritePrompt",
     label: "封面文案提示词",
     desc: "控制 AI 如何生成大字报风格的封面主标题和副标题",
-    placeholder: "输入封面文案的系统提示词...",
+    helper:
+      "可以直接写自然语言规则，不用保留 {{...}}。保存后若该项已修改，会进入直通模式：默认模板规则不再追加，系统只自动提供原内容、当前二创结果和替换词库。",
+    placeholder: "直接写你希望 AI 如何生成封面文案，例如：提炼最强钩子，保留原风格，直接输出结果...",
     defaultValue: DEFAULT_COVER_REWRITE_PROMPT,
     variables: [
-      { name: "{{REPLACE_INFO}}", desc: "封面文案替换词库，自动注入" },
-      { name: "{{PROHIBITED_WORDS}}", desc: "违禁词列表，自动注入" },
+      { name: "{{REPLACE_INFO}}", desc: "可选：想指定插入位置时再用" },
+      { name: "{{PROHIBITED_WORDS}}", desc: "可选：想显式引用违禁词时再用" },
     ],
   },
   {
     key: "extractReplacePrompt",
     label: "提取替换词提示词",
     desc: "控制 AI 如何从原文与二创文中自动提取替换规律",
-    placeholder: "输入提取替换词的提示词...",
+    helper:
+      "可以直接写自然语言规则，不用保留 {{...}}。保存后若该项已修改，会按你的规则提取替换词，并自动提供原文与二创内容作为上下文。",
+    placeholder: "直接写你希望 AI 如何提取替换词，例如：只提取地点、岗位、品牌和核心卖点的变化...",
     defaultValue: DEFAULT_EXTRACT_REPLACE_PROMPT,
     variables: [
-      { name: "{{ORIGINAL_AND_REWRITTEN}}", desc: "原文与二创文内容，自动注入" },
+      { name: "{{ORIGINAL_AND_REWRITTEN}}", desc: "可选：想指定插入位置时再用" },
     ],
   },
 ];
@@ -106,6 +115,9 @@ function PromptCard({
 
       {open && (
         <div className="px-5 pb-5 border-t border-gray-100">
+          <p className="mt-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+            {section.helper}
+          </p>
           <div className="mt-3 mb-3 flex flex-wrap gap-2">
             {section.variables.map((v) => (
               <div
@@ -202,7 +214,9 @@ export default function AdvancedSettingsModule() {
       <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
         <div>
           <h2 className="text-base font-semibold text-gray-900">高级设置</h2>
-          <p className="text-xs text-gray-500 mt-0.5">自定义二创提示词，刷新页面后会自动恢复</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            直接写你想要的规则，不需要改模板变量；刷新页面后会自动恢复
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <button

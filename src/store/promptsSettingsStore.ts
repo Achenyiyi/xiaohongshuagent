@@ -1,9 +1,14 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import {
+  hasOriginalAndRewrittenPlaceholder,
+  hasReplaceInfoPlaceholder,
   injectOriginalAndRewritten,
   injectProhibitedWords,
   injectReplaceInfo,
+  replaceOriginalAndRewrittenIfPresent,
+  replaceProhibitedWordsIfPresent,
+  replaceReplaceInfoIfPresent,
 } from "@/lib/promptInjection";
 
 export interface PromptConfig {
@@ -11,6 +16,18 @@ export interface PromptConfig {
   titleRewritePrompt: string;
   coverRewritePrompt: string;
   extractReplacePrompt: string;
+}
+
+export type PromptExecutionMode = "default" | "custom";
+
+function normalizePromptTemplate(template: string) {
+  return template.replace(/\r\n/g, "\n").trim();
+}
+
+function resolvePromptMode(template: string, defaultTemplate: string): PromptExecutionMode {
+  return normalizePromptTemplate(template) === normalizePromptTemplate(defaultTemplate)
+    ? "default"
+    : "custom";
 }
 
 export const DEFAULT_BODY_REWRITE_PROMPT = `# Role：小红书内容仿写专家
@@ -162,6 +179,14 @@ interface PromptsSettingsState extends PromptConfig {
   setExtractReplacePrompt: (v: string) => void;
   resetAllPrompts: () => void;
 
+  getBodyPromptMode: () => PromptExecutionMode;
+  getTitlePromptMode: () => PromptExecutionMode;
+  getCoverPromptMode: () => PromptExecutionMode;
+  getExtractPromptMode: () => PromptExecutionMode;
+  bodyPromptHasInlineReplaceInfo: () => boolean;
+  titlePromptHasInlineReplaceInfo: () => boolean;
+  coverPromptHasInlineReplaceInfo: () => boolean;
+  extractPromptHasInlineOriginalAndRewritten: () => boolean;
   buildBodyPrompt: (replaceInfo: string) => string;
   buildTitlePrompt: (replaceInfo: string) => string;
   buildCoverPrompt: (replaceInfo: string) => string;
@@ -195,17 +220,52 @@ export const usePromptsSettingsStore = create<PromptsSettingsState>()(
           extractReplacePrompt: DEFAULT_EXTRACT_REPLACE_PROMPT,
         }),
 
+      getBodyPromptMode: () =>
+        resolvePromptMode(get().bodyRewritePrompt, DEFAULT_BODY_REWRITE_PROMPT),
+
+      getTitlePromptMode: () =>
+        resolvePromptMode(get().titleRewritePrompt, DEFAULT_TITLE_REWRITE_PROMPT),
+
+      getCoverPromptMode: () =>
+        resolvePromptMode(get().coverRewritePrompt, DEFAULT_COVER_REWRITE_PROMPT),
+
+      getExtractPromptMode: () =>
+        resolvePromptMode(get().extractReplacePrompt, DEFAULT_EXTRACT_REPLACE_PROMPT),
+
+      bodyPromptHasInlineReplaceInfo: () => hasReplaceInfoPlaceholder(get().bodyRewritePrompt),
+
+      titlePromptHasInlineReplaceInfo: () => hasReplaceInfoPlaceholder(get().titleRewritePrompt),
+
+      coverPromptHasInlineReplaceInfo: () => hasReplaceInfoPlaceholder(get().coverRewritePrompt),
+
+      extractPromptHasInlineOriginalAndRewritten: () =>
+        hasOriginalAndRewrittenPlaceholder(get().extractReplacePrompt),
+
       buildBodyPrompt: (replaceInfo) =>
-        injectProhibitedWords(injectReplaceInfo(get().bodyRewritePrompt, replaceInfo)),
+        get().getBodyPromptMode() === "custom"
+          ? replaceProhibitedWordsIfPresent(
+              replaceReplaceInfoIfPresent(get().bodyRewritePrompt, replaceInfo)
+            )
+          : injectProhibitedWords(injectReplaceInfo(get().bodyRewritePrompt, replaceInfo)),
 
       buildTitlePrompt: (replaceInfo) =>
-        injectProhibitedWords(injectReplaceInfo(get().titleRewritePrompt, replaceInfo)),
+        get().getTitlePromptMode() === "custom"
+          ? replaceProhibitedWordsIfPresent(
+              replaceReplaceInfoIfPresent(get().titleRewritePrompt, replaceInfo)
+            )
+          : injectProhibitedWords(injectReplaceInfo(get().titleRewritePrompt, replaceInfo)),
 
       buildCoverPrompt: (replaceInfo) =>
-        injectProhibitedWords(injectReplaceInfo(get().coverRewritePrompt, replaceInfo)),
+        get().getCoverPromptMode() === "custom"
+          ? replaceProhibitedWordsIfPresent(
+              replaceReplaceInfoIfPresent(get().coverRewritePrompt, replaceInfo)
+            )
+          : injectProhibitedWords(injectReplaceInfo(get().coverRewritePrompt, replaceInfo)),
 
       buildExtractPrompt: (original, rewritten) =>
-        injectOriginalAndRewritten(get().extractReplacePrompt, original, rewritten),
+        get().getExtractPromptMode() === "custom"
+          ? replaceOriginalAndRewrittenIfPresent(get().extractReplacePrompt, original, rewritten)
+          : injectOriginalAndRewritten(get().extractReplacePrompt, original, rewritten),
     }),
     {
       name: "xhs-app-prompts-settings",

@@ -9,6 +9,7 @@ import {
   ChevronUp,
   Check,
   Edit3,
+  RotateCcw,
   X,
   Plus,
   Trash2,
@@ -37,9 +38,16 @@ type TemplateOption = {
 };
 
 type ImageEditMode = "text" | "image";
+type RetryableRewriteField = "coverText" | "title" | "body";
 
 type ExtractedReplaceInfoByScope = Record<ReplaceLibraryScope, string[]>;
 type PendingExtractedEntriesByScope = Record<ReplaceLibraryScope, ReplaceEntryDraft[]>;
+
+const RETRY_FIELD_LABELS: Record<RetryableRewriteField, string> = {
+  coverText: "二创封面文案",
+  title: "二创标题",
+  body: "二创正文",
+};
 
 const TEMPLATE_OPTIONS: TemplateOption[] = [
   {
@@ -419,6 +427,7 @@ export default function RewriteModule() {
     autoMergeExtractedEntries,
     setAutoMergeExtractedEntries,
     replaceEntriesByScope,
+    resetToPresets,
     addReplaceEntry,
     updateReplaceEntry,
     removeReplaceEntry,
@@ -426,7 +435,20 @@ export default function RewriteModule() {
     mergeExtractedEntries,
   } = useRewriteSettingsStore();
 
-  const { buildBodyPrompt, buildTitlePrompt, buildCoverPrompt, extractReplacePrompt } = usePromptsSettingsStore();
+  const {
+    buildBodyPrompt,
+    buildTitlePrompt,
+    buildCoverPrompt,
+    extractReplacePrompt,
+    getBodyPromptMode,
+    getTitlePromptMode,
+    getCoverPromptMode,
+    getExtractPromptMode,
+    bodyPromptHasInlineReplaceInfo,
+    titlePromptHasInlineReplaceInfo,
+    coverPromptHasInlineReplaceInfo,
+    extractPromptHasInlineOriginalAndRewritten,
+  } = usePromptsSettingsStore();
 
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
@@ -463,6 +485,142 @@ export default function RewriteModule() {
     [replaceEntriesByScope]
   );
 
+  const buildRewritePromptPayload = useCallback(
+    (field: RetryableRewriteField, replaceInfo: string) => {
+      if (field === "title") {
+        return {
+          systemPrompt: buildTitlePrompt(replaceInfo),
+          promptMode: getTitlePromptMode(),
+          promptIncludesReplaceInfo: titlePromptHasInlineReplaceInfo(),
+        };
+      }
+
+      if (field === "body") {
+        return {
+          systemPrompt: buildBodyPrompt(replaceInfo),
+          promptMode: getBodyPromptMode(),
+          promptIncludesReplaceInfo: bodyPromptHasInlineReplaceInfo(),
+        };
+      }
+
+      return {
+        systemPrompt: buildCoverPrompt(replaceInfo),
+        promptMode: getCoverPromptMode(),
+        promptIncludesReplaceInfo: coverPromptHasInlineReplaceInfo(),
+      };
+    },
+    [
+      bodyPromptHasInlineReplaceInfo,
+      buildBodyPrompt,
+      buildCoverPrompt,
+      buildTitlePrompt,
+      coverPromptHasInlineReplaceInfo,
+      getBodyPromptMode,
+      getCoverPromptMode,
+      getTitlePromptMode,
+      titlePromptHasInlineReplaceInfo,
+    ]
+  );
+
+  const ensureOriginalCoverText = useCallback(async (note: RewriteResult["originalNote"]) => {
+    if (note.cover && !note.coverText) {
+      const res = await callRewriteApi({
+        type: "extract-image-text",
+        imageUrl: note.cover,
+      });
+      return res.result || "";
+    }
+    return note.coverText || "";
+  }, []);
+
+  const retryRewriteField = useCallback(
+    async (resultId: string, field: RetryableRewriteField) => {
+      const current = useAppStore.getState().rewriteResults.find((item) => item.id === resultId);
+      if (!current) return;
+
+      const note = current.originalNote;
+
+      try {
+        if (field === "title") {
+          const titleReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("title") : "";
+          const titlePromptPayload = buildRewritePromptPayload("title", titleReplaceInfo);
+          const titleRes = await callRewriteApi({
+            type: "title",
+            content: sanitizeTitle(note.originalTitle || "") || note.originalBody || "",
+            replaceInfo: titleReplaceInfo,
+            ...titlePromptPayload,
+          });
+
+          updateRewriteResult(resultId, {
+            rewrittenTitle: titleRes.result || "",
+            titleReplaceInfo,
+            errorMsg: undefined,
+          });
+          return;
+        }
+
+        if (field === "body") {
+          const bodyReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("body") : "";
+          const bodyPromptPayload = buildRewritePromptPayload("body", bodyReplaceInfo);
+          const bodyRes = await callRewriteApi({
+            type: "body",
+            content: note.originalBody || "",
+            replaceInfo: bodyReplaceInfo,
+            ...bodyPromptPayload,
+          });
+
+          updateRewriteResult(resultId, {
+            rewrittenBody: normalizeRewrittenBody(bodyRes.result || "", note.originalBody || ""),
+            bodyReplaceInfo,
+            errorMsg: undefined,
+          });
+          return;
+        }
+
+        const coverReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("cover") : "";
+        const originalCoverText = await ensureOriginalCoverText(note);
+        const coverPromptPayload = buildRewritePromptPayload("coverText", coverReplaceInfo);
+        const coverTextRes = await callRewriteApi({
+          type: "cover-text",
+          originalTitle: note.originalTitle || "",
+          originalBody: note.originalBody || "",
+          originalCoverText,
+          rewrittenTitle: current.rewrittenTitle,
+          rewrittenBody: current.rewrittenBody,
+          replaceInfo: coverReplaceInfo,
+          ...coverPromptPayload,
+        });
+
+        updateRewriteResult(resultId, {
+          originalNote: {
+            ...note,
+            coverText: originalCoverText,
+          },
+          rewrittenCoverText: coverTextRes.result || "",
+          coverReplaceInfo,
+          errorMsg: undefined,
+        });
+      } catch (e: unknown) {
+        const message =
+          e instanceof Error
+            ? `${RETRY_FIELD_LABELS[field]}重试失败：${e.message}`
+            : `${RETRY_FIELD_LABELS[field]}重试失败`;
+        setSaveMsg(message);
+        window.setTimeout(() => {
+          setSaveMsg((currentMsg) => (currentMsg === message ? "" : currentMsg));
+        }, 3000);
+        throw e;
+      }
+    },
+    [
+      buildRewritePromptPayload,
+      buildReplaceInfoString,
+      ensureOriginalCoverText,
+      replaceLibraryEnabled,
+      updateRewriteResult,
+    ]
+  );
+
   const startRewrite = useCallback(
     async (resultId: string) => {
       const result = useAppStore.getState().rewriteResults.find((item) => item.id === resultId);
@@ -476,33 +634,29 @@ export default function RewriteModule() {
         const bodyReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("body") : "";
         const coverReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("cover") : "";
 
-        const originalCoverTextPromise =
-          note.cover && !note.coverText
-            ? callRewriteApi({
-                type: "extract-image-text",
-                imageUrl: note.cover,
-              })
-            : Promise.resolve({ result: note.coverText || "" });
+        const originalCoverTextPromise = ensureOriginalCoverText(note);
+        const titlePromptPayload = buildRewritePromptPayload("title", titleReplaceInfo);
+        const bodyPromptPayload = buildRewritePromptPayload("body", bodyReplaceInfo);
 
-        const [titleRes, bodyRes, coverTextRes] = await Promise.all([
+        const [titleRes, bodyRes, originalCoverText] = await Promise.all([
           callRewriteApi({
             type: "title",
             content: sanitizeTitle(note.originalTitle || "") || note.originalBody || "",
             replaceInfo: titleReplaceInfo,
-            systemPrompt: buildTitlePrompt(titleReplaceInfo),
+            ...titlePromptPayload,
           }),
           callRewriteApi({
             type: "body",
             content: note.originalBody || "",
             replaceInfo: bodyReplaceInfo,
-            systemPrompt: buildBodyPrompt(bodyReplaceInfo),
+            ...bodyPromptPayload,
           }),
           originalCoverTextPromise,
         ]);
 
         const rewrittenTitle = titleRes.result || "";
         const rewrittenBody = normalizeRewrittenBody(bodyRes.result || "", note.originalBody || "");
-        const originalCoverText = coverTextRes.result || note.coverText || "";
+        const coverPromptPayload = buildRewritePromptPayload("coverText", coverReplaceInfo);
         const rewrittenCoverTextRes = await callRewriteApi({
           type: "cover-text",
           originalTitle: note.originalTitle || "",
@@ -511,7 +665,7 @@ export default function RewriteModule() {
           rewrittenTitle,
           rewrittenBody,
           replaceInfo: coverReplaceInfo,
-          systemPrompt: buildCoverPrompt(coverReplaceInfo),
+          ...coverPromptPayload,
         });
         const rewrittenCoverText = rewrittenCoverTextRes.result || "";
 
@@ -546,7 +700,13 @@ export default function RewriteModule() {
         });
       }
     },
-    [buildBodyPrompt, buildCoverPrompt, buildReplaceInfoString, buildTitlePrompt, replaceLibraryEnabled, updateRewriteResult]
+    [
+      buildRewritePromptPayload,
+      buildReplaceInfoString,
+      ensureOriginalCoverText,
+      replaceLibraryEnabled,
+      updateRewriteResult,
+    ]
   );
 
   useEffect(() => {
@@ -575,6 +735,9 @@ export default function RewriteModule() {
         body: JSON.stringify({
           results: selected,
           extractReplacePromptTemplate: extractReplacePrompt,
+          extractReplacePromptMode: getExtractPromptMode(),
+          extractPromptIncludesOriginalAndRewritten:
+            extractPromptHasInlineOriginalAndRewritten(),
         }),
       });
       const data = await res.json();
@@ -837,6 +1000,15 @@ export default function RewriteModule() {
     window.setTimeout(() => setSaveMsg(""), 2000);
   }
 
+  function handleResetReplaceLibraries() {
+    const confirmed = window.confirm("确认将标题、正文、封面文案三份替换词库恢复为默认预设吗？");
+    if (!confirmed) return;
+
+    resetToPresets();
+    setSaveMsg("已恢复默认替换词库");
+    window.setTimeout(() => setSaveMsg(""), 2000);
+  }
+
   const doneCount = rewriteResults.filter((item) => item.status === "done").length;
   const processingCount = rewriteResults.filter((item) => item.status === "processing").length;
   const selectedDoneCount = rewriteResults.filter(
@@ -946,6 +1118,16 @@ export default function RewriteModule() {
               </span>
             </div>
             <div className="flex items-center gap-3">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleResetReplaceLibraries();
+                }}
+                className="flex items-center gap-1.5 rounded-full border border-amber-200 bg-white/85 px-3 py-1.5 text-xs font-medium text-amber-700 shadow-sm transition-colors hover:border-amber-300 hover:bg-white"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                重置默认替换词库
+              </button>
               <div
                 className="flex items-center gap-1.5 rounded-full bg-white/80 px-2 py-1 ring-1 ring-amber-100"
                 onClick={(e) => e.stopPropagation()}
@@ -1207,6 +1389,7 @@ export default function RewriteModule() {
                 onToggleSelect={() => toggleRewriteSelect(result.id)}
                 onUpdate={(updates) => updateRewriteResult(result.id, updates)}
                 onRetry={() => startRewrite(result.id)}
+                onRetryField={(field) => retryRewriteField(result.id, field)}
                 onDelete={() => deleteRewriteResults([result.id])}
               />
             ))}
@@ -1224,6 +1407,7 @@ function RewriteRow({
   onToggleSelect,
   onUpdate,
   onRetry,
+  onRetryField,
   onDelete,
 }: {
   result: RewriteResult;
@@ -1232,6 +1416,7 @@ function RewriteRow({
   onToggleSelect: () => void;
   onUpdate: (updates: Partial<RewriteResult>) => void;
   onRetry: () => void;
+  onRetryField: (field: RetryableRewriteField) => Promise<void>;
   onDelete: () => void;
 }) {
   const [expanded, setExpanded] = useState(true);
@@ -1243,6 +1428,11 @@ function RewriteRow({
   const [showTemplates, setShowTemplates] = useState(false);
   const [generatingCover, setGeneratingCover] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
+  const [retryingFields, setRetryingFields] = useState<Record<RetryableRewriteField, boolean>>({
+    coverText: false,
+    title: false,
+    body: false,
+  });
   const [editDialog, setEditDialog] = useState<{
     prompt: string;
     mode: ImageEditMode;
@@ -1255,6 +1445,18 @@ function RewriteRow({
   const originalTags = buildOriginalTags(result);
   const rewrittenTags = buildDisplayTags(result);
   const isSaved = isRewriteResultSaved(result, note);
+
+  async function handleRetryField(field: RetryableRewriteField) {
+    if (retryingFields[field]) return;
+    setRetryingFields((current) => ({ ...current, [field]: true }));
+    try {
+      await onRetryField(field);
+    } catch (error) {
+      console.error(`${RETRY_FIELD_LABELS[field]}重新生成失败:`, error);
+    } finally {
+      setRetryingFields((current) => ({ ...current, [field]: false }));
+    }
+  }
 
   function openCoverEditDialog(mode: ImageEditMode) {
     setEditDialog({
@@ -1372,16 +1574,27 @@ function RewriteRow({
               <div className="bg-gray-50 rounded-xl p-3 space-y-2">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">封面</p>
 
-                <div className="relative aspect-[3/4] bg-gray-200 rounded-lg overflow-hidden w-24">
+                <div className="group relative aspect-[3/4] bg-gray-200 rounded-lg overflow-hidden w-24">
                   {note.cover ? (
-                    <Image
-                      src={`/api/proxy-image?url=${encodeURIComponent(note.cover)}`}
-                      alt="原封面"
-                      fill
-                      sizes="96px"
-                      className="object-cover"
-                      unoptimized
-                    />
+                    <>
+                      <Image
+                        src={`/api/proxy-image?url=${encodeURIComponent(note.cover)}`}
+                        alt="原封面"
+                        fill
+                        sizes="96px"
+                        className="object-cover"
+                        unoptimized
+                      />
+                      <HoverImageActions
+                        previewLabel="原封面预览"
+                        onPreview={() =>
+                          setPreviewImage({
+                            src: `/api/proxy-image?url=${encodeURIComponent(note.cover || "")}`,
+                            title: "原封面预览",
+                          })
+                        }
+                      />
+                    </>
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">无封面</div>
                   )}
@@ -1545,7 +1758,9 @@ function RewriteRow({
                       label="二创封面文案"
                       value={result.rewrittenCoverText}
                       editing={editingCoverText}
+                      retrying={retryingFields.coverText}
                       onEdit={() => setEditingCoverText(true)}
+                      onRetry={() => handleRetryField("coverText")}
                       onSave={(value) => {
                         onUpdate({ rewrittenCoverText: value });
                         setEditingCoverText(false);
@@ -1558,7 +1773,9 @@ function RewriteRow({
                       label="二创标题"
                       value={result.rewrittenTitle}
                       editing={editingTitle}
+                      retrying={retryingFields.title}
                       onEdit={() => setEditingTitle(true)}
+                      onRetry={() => handleRetryField("title")}
                       onSave={(value) => {
                         onUpdate({ rewrittenTitle: value });
                         setEditingTitle(false);
@@ -1571,7 +1788,9 @@ function RewriteRow({
                       label="二创正文"
                       value={result.rewrittenBody}
                       editing={editingBody}
+                      retrying={retryingFields.body}
                       onEdit={() => setEditingBody(true)}
+                      onRetry={() => handleRetryField("body")}
                       onSave={(value) => {
                         onUpdate({ rewrittenBody: normalizeRewrittenBody(value, note.originalBody || "") });
                         setEditingBody(false);
@@ -1644,10 +1863,12 @@ function HoverImageActions({
   onPreview,
   onEdit,
   small = false,
+  previewLabel = "预览",
 }: {
   onPreview: () => void;
-  onEdit: () => void;
+  onEdit?: () => void;
   small?: boolean;
+  previewLabel?: string;
 }) {
   return (
     <div className="absolute inset-0 bg-black/40 opacity-0 transition-opacity group-hover:opacity-100 flex items-center justify-center gap-2">
@@ -1662,21 +1883,23 @@ function HoverImageActions({
           small ? "px-2 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
         )}
       >
-        预览
+        {previewLabel}
       </button>
-      <button
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onEdit();
-        }}
-        className={clsx(
-          "rounded-lg bg-white/90 text-gray-700 hover:bg-white",
-          small ? "px-2 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
-        )}
-      >
-        编辑
-      </button>
+      {onEdit && (
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onEdit();
+          }}
+          className={clsx(
+            "rounded-lg bg-white/90 text-gray-700 hover:bg-white",
+            small ? "px-2 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
+          )}
+        >
+          编辑
+        </button>
+      )}
     </div>
   );
 }
@@ -1969,7 +2192,9 @@ function EditableField({
   label,
   value,
   editing,
+  retrying = false,
   onEdit,
+  onRetry,
   onSave,
   onCancel,
   multiline,
@@ -1977,7 +2202,9 @@ function EditableField({
   label: string;
   value: string;
   editing: boolean;
+  retrying?: boolean;
   onEdit: () => void;
+  onRetry?: () => void | Promise<void>;
   onSave: (value: string) => void;
   onCancel: () => void;
   multiline: boolean;
@@ -1989,15 +2216,35 @@ function EditableField({
       <div className="flex items-center justify-between mb-0.5">
         <p className="text-xs text-gray-400">{label}</p>
         {!editing && (
-          <button
-            onClick={() => {
-              setDraft(value);
-              onEdit();
-            }}
-            className="text-xs text-gray-400 hover:text-gray-600"
-          >
-            <Edit3 className="w-3 h-3" />
-          </button>
+          <div className="flex items-center gap-1">
+            {onRetry && (
+              <button
+                onClick={() => void onRetry()}
+                disabled={retrying}
+                title={`重新生成${label}`}
+                aria-label={`重新生成${label}`}
+                className={clsx(
+                  "text-xs transition-colors",
+                  retrying ? "cursor-not-allowed text-gray-300" : "text-gray-400 hover:text-gray-600"
+                )}
+              >
+                <RotateCcw className={clsx("w-3 h-3", retrying && "animate-spin")} />
+              </button>
+            )}
+            <button
+              onClick={() => {
+                setDraft(value);
+                onEdit();
+              }}
+              disabled={retrying}
+              className={clsx(
+                "text-xs transition-colors",
+                retrying ? "cursor-not-allowed text-gray-300" : "text-gray-400 hover:text-gray-600"
+              )}
+            >
+              <Edit3 className="w-3 h-3" />
+            </button>
+          </div>
         )}
       </div>
       {editing ? (

@@ -17,7 +17,11 @@ import { fetchImageResponse } from "@/lib/serverImage";
 import { setIfFieldExists, setIfFieldHasValue } from "@/lib/collectTableFields";
 import { dedupeTags, formatTagsForStorage, stripTagsFromText } from "@/lib/xhs";
 import { sanitizeExtractedImageText } from "@/lib/coverText";
-import { injectOriginalAndRewritten } from "@/lib/promptInjection";
+import {
+  buildOriginalAndRewrittenBlock,
+  injectOriginalAndRewritten,
+  replaceOriginalAndRewrittenIfPresent,
+} from "@/lib/promptInjection";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
 const DASHSCOPE_API_KEY = runtimeConfig.dashscope.apiKey;
@@ -28,6 +32,7 @@ const FIELD_TYPE_TEXT = 1;
 const FIELD_TYPE_DATETIME = 5;
 const FIELD_TYPE_ATTACHMENT = 17;
 const COMBINED_REPLACE_INFO_FIELD_NAME = "二创替换信息";
+type PromptMode = "default" | "custom";
 const REWRITE_TABLE_FIELDS = [
   { field_name: "二创日期", type: FIELD_TYPE_DATETIME },
   { field_name: "封面", type: FIELD_TYPE_ATTACHMENT },
@@ -258,15 +263,47 @@ function prependScopeInstruction(prompt: string, scope: ReplaceInfoScope) {
   return `${scopeInstruction}\n\n${prompt}`;
 }
 
+function normalizePromptMode(value: unknown): PromptMode {
+  return value === "custom" ? "custom" : "default";
+}
+
+function buildCustomExtractPrompt(
+  promptTemplate: string,
+  original: { title: string; body: string; coverText: string },
+  rewritten: { title: string; body: string; coverText: string },
+  promptIncludesOriginalAndRewritten: boolean
+) {
+  if (promptIncludesOriginalAndRewritten) {
+    return replaceOriginalAndRewrittenIfPresent(promptTemplate, original, rewritten);
+  }
+
+  const contextBlock = buildOriginalAndRewrittenBlock(original, rewritten);
+  const trimmedTemplate = promptTemplate.trim();
+  if (!trimmedTemplate) {
+    return contextBlock;
+  }
+
+  return `${trimmedTemplate}\n\n## 原文与二创内容\n\n${contextBlock}`;
+}
+
 async function extractReplaceInfoForScope(
   result: RewriteResult,
   scope: ReplaceInfoScope,
-  customPromptTemplate?: string
+  customPromptTemplate?: string,
+  promptMode: PromptMode = "default",
+  promptIncludesOriginalAndRewritten = false
 ): Promise<string> {
   try {
     const { original, rewritten } = buildScopeOriginalAndRewritten(result, scope);
     let prompt: string;
-    if (customPromptTemplate) {
+    if (customPromptTemplate && promptMode === "custom") {
+      prompt = buildCustomExtractPrompt(
+        customPromptTemplate,
+        original,
+        rewritten,
+        promptIncludesOriginalAndRewritten
+      );
+    } else if (customPromptTemplate) {
       prompt = injectOriginalAndRewritten(customPromptTemplate, original, rewritten);
     } else {
       prompt = buildExtractReplaceInfoPrompt(original, rewritten);
@@ -293,12 +330,32 @@ async function extractReplaceInfoForScope(
 
 async function extractReplaceInfoByScope(
   result: RewriteResult,
-  customPromptTemplate?: string
+  customPromptTemplate?: string,
+  promptMode: PromptMode = "default",
+  promptIncludesOriginalAndRewritten = false
 ): Promise<ReplaceInfoByScope> {
   const [title, body, cover] = await Promise.all([
-    extractReplaceInfoForScope(result, "title", customPromptTemplate),
-    extractReplaceInfoForScope(result, "body", customPromptTemplate),
-    extractReplaceInfoForScope(result, "cover", customPromptTemplate),
+    extractReplaceInfoForScope(
+      result,
+      "title",
+      customPromptTemplate,
+      promptMode,
+      promptIncludesOriginalAndRewritten
+    ),
+    extractReplaceInfoForScope(
+      result,
+      "body",
+      customPromptTemplate,
+      promptMode,
+      promptIncludesOriginalAndRewritten
+    ),
+    extractReplaceInfoForScope(
+      result,
+      "cover",
+      customPromptTemplate,
+      promptMode,
+      promptIncludesOriginalAndRewritten
+    ),
   ]);
 
   return { title, body, cover };
@@ -530,7 +587,14 @@ export async function POST(req: NextRequest) {
     const {
       results,
       extractReplacePromptTemplate = "",
-    }: { results: RewriteResult[]; extractReplacePromptTemplate?: string } = await req.json();
+      extractReplacePromptMode,
+      extractPromptIncludesOriginalAndRewritten = false,
+    }: {
+      results: RewriteResult[];
+      extractReplacePromptTemplate?: string;
+      extractReplacePromptMode?: PromptMode;
+      extractPromptIncludesOriginalAndRewritten?: boolean;
+    } = await req.json();
 
     if (!results || results.length === 0) {
       return NextResponse.json({ error: "没有可保存的内容" }, { status: 400 });
@@ -544,6 +608,7 @@ export async function POST(req: NextRequest) {
       collectFields.items.map((field) => [field.field_name, field.type])
     );
     const promptTemplate = extractReplacePromptTemplate || undefined;
+    const promptMode = normalizePromptMode(extractReplacePromptMode);
     const originalCoverAttachmentTasks = new Map<string, Promise<UploadedAttachment | null>>();
 
     async function getOriginalCoverAttachment(result: RewriteResult) {
@@ -591,7 +656,12 @@ export async function POST(req: NextRequest) {
     async function persistSingleResult(result: RewriteResult): Promise<PersistedResultItem> {
       const [extractedByScope, originalCoverAttachment, draftCoverAttachment] =
         await Promise.all([
-          extractReplaceInfoByScope(result, promptTemplate),
+          extractReplaceInfoByScope(
+            result,
+            promptTemplate,
+            promptMode,
+            extractPromptIncludesOriginalAndRewritten
+          ),
           getOriginalCoverAttachment(result),
           uploadDraftCoverAttachment(result),
         ]);
