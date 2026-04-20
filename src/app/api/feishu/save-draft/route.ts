@@ -28,11 +28,6 @@ const FIELD_TYPE_TEXT = 1;
 const FIELD_TYPE_DATETIME = 5;
 const FIELD_TYPE_ATTACHMENT = 17;
 const COMBINED_REPLACE_INFO_FIELD_NAME = "二创替换信息";
-const REPLACE_INFO_FIELD_NAMES = {
-  title: "标题替换信息",
-  body: "正文替换信息",
-  cover: "封面文案替换信息",
-} as const;
 const REWRITE_TABLE_FIELDS = [
   { field_name: "二创日期", type: FIELD_TYPE_DATETIME },
   { field_name: "封面", type: FIELD_TYPE_ATTACHMENT },
@@ -46,20 +41,11 @@ const REWRITE_TABLE_FIELDS = [
   { field_name: "二创正文", type: FIELD_TYPE_TEXT },
   { field_name: "二创标签", type: FIELD_TYPE_TEXT },
   { field_name: COMBINED_REPLACE_INFO_FIELD_NAME, type: FIELD_TYPE_TEXT },
-  { field_name: REPLACE_INFO_FIELD_NAMES.title, type: FIELD_TYPE_TEXT },
-  { field_name: REPLACE_INFO_FIELD_NAMES.body, type: FIELD_TYPE_TEXT },
-  { field_name: REPLACE_INFO_FIELD_NAMES.cover, type: FIELD_TYPE_TEXT },
   { field_name: "笔记链接", type: FIELD_TYPE_TEXT },
   { field_name: "源记录ID", type: FIELD_TYPE_TEXT },
   { field_name: "点赞数", type: 2 },
   { field_name: "收藏数", type: 2 },
   { field_name: "评论数", type: 2 },
-] as const;
-const COLLECT_REWRITE_FIELDS = [
-  { field_name: COMBINED_REPLACE_INFO_FIELD_NAME, type: FIELD_TYPE_TEXT },
-  { field_name: REPLACE_INFO_FIELD_NAMES.title, type: FIELD_TYPE_TEXT },
-  { field_name: REPLACE_INFO_FIELD_NAMES.body, type: FIELD_TYPE_TEXT },
-  { field_name: REPLACE_INFO_FIELD_NAMES.cover, type: FIELD_TYPE_TEXT },
 ] as const;
 const SAVE_DRAFT_CONCURRENCY = runtimeConfig.saveDraft.concurrency;
 const SAVE_DRAFT_RETRY_ATTEMPTS = runtimeConfig.saveDraft.retryAttempts;
@@ -76,7 +62,7 @@ const RETRYABLE_ERROR_KEYWORDS = [
   "rate limit",
 ] as const;
 
-type ReplaceInfoScope = keyof typeof REPLACE_INFO_FIELD_NAMES;
+type ReplaceInfoScope = "title" | "body" | "cover";
 type ReplaceInfoByScope = Record<ReplaceInfoScope, string>;
 type UploadedAttachment = Awaited<ReturnType<typeof uploadAttachmentToBitable>>;
 type CollectRecordUpdate = {
@@ -195,21 +181,21 @@ function buildUsedReplaceInfo(result: RewriteResult): ReplaceInfoByScope {
 
 function buildCombinedReplaceInfoSnapshot(usedReplaceInfo: ReplaceInfoByScope) {
   const hasAnyValue =
+    Boolean(usedReplaceInfo.cover) ||
     Boolean(usedReplaceInfo.title) ||
-    Boolean(usedReplaceInfo.body) ||
-    Boolean(usedReplaceInfo.cover);
+    Boolean(usedReplaceInfo.body);
 
   if (!hasAnyValue) return "";
 
   return [
-    "标题",
+    "【封面文案】",
+    usedReplaceInfo.cover || "暂无",
+    "",
+    "【标题】",
     usedReplaceInfo.title || "暂无",
     "",
-    "正文",
+    "【正文】",
     usedReplaceInfo.body || "暂无",
-    "",
-    "封面文案",
-    usedReplaceInfo.cover || "暂无",
   ].join("\n");
 }
 
@@ -445,14 +431,6 @@ async function ensureRewriteTable() {
   };
 }
 
-async function ensureCollectRewriteFields() {
-  const fields = await ensureTableFields(TABLE_ID, COLLECT_REWRITE_FIELDS);
-  return {
-    fields,
-    fieldTypeMap: new Map(fields.map((field) => [field.field_name, field.type])),
-  };
-}
-
 function buildRewriteTableFields(params: {
   result: RewriteResult;
   rewriteFields: Array<{ field_name: string; type: number }>;
@@ -500,9 +478,6 @@ function buildRewriteTableFields(params: {
     COMBINED_REPLACE_INFO_FIELD_NAME,
     combinedReplaceInfoSnapshot
   );
-  setIfFieldHasValue(fields, targetFieldTypeMap, REPLACE_INFO_FIELD_NAMES.title, usedReplaceInfo.title);
-  setIfFieldHasValue(fields, targetFieldTypeMap, REPLACE_INFO_FIELD_NAMES.body, usedReplaceInfo.body);
-  setIfFieldHasValue(fields, targetFieldTypeMap, REPLACE_INFO_FIELD_NAMES.cover, usedReplaceInfo.cover);
 
   if (targetFieldTypeMap.get("笔记链接") === 15 && result.originalNote.noteLink) {
     fields["笔记链接"] = {
@@ -532,8 +507,6 @@ function buildCollectUpdateFields(
 ) {
   const fields: Record<string, unknown> = {};
   const inheritedTags = buildInheritedTags(result);
-  const usedReplaceInfo = buildUsedReplaceInfo(result);
-  const combinedReplaceInfoSnapshot = buildCombinedReplaceInfoSnapshot(usedReplaceInfo);
   const normalizedOriginalCoverText = sanitizeExtractedImageText(
     result.originalNote.coverText || ""
   );
@@ -547,15 +520,6 @@ function buildCollectUpdateFields(
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创正文", result.rewrittenBody);
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创标签", formatTagsForStorage(inheritedTags));
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创封面文案", normalizedRewrittenCoverText);
-  setIfFieldHasValue(
-    fields,
-    collectFieldTypeMap,
-    COMBINED_REPLACE_INFO_FIELD_NAME,
-    combinedReplaceInfoSnapshot
-  );
-  setIfFieldHasValue(fields, collectFieldTypeMap, REPLACE_INFO_FIELD_NAMES.title, usedReplaceInfo.title);
-  setIfFieldHasValue(fields, collectFieldTypeMap, REPLACE_INFO_FIELD_NAMES.body, usedReplaceInfo.body);
-  setIfFieldHasValue(fields, collectFieldTypeMap, REPLACE_INFO_FIELD_NAMES.cover, usedReplaceInfo.cover);
   setIfFieldExists(fields, collectFieldTypeMap, "已二创", true);
 
   return fields;
@@ -575,7 +539,10 @@ export async function POST(req: NextRequest) {
     const { tableId, tableName, fields: rewriteFields } = await ensureRewriteTable();
     const persistResults = results;
     const rewriteTimestamp = Date.now();
-    const { fieldTypeMap: collectFieldTypeMap } = await ensureCollectRewriteFields();
+    const collectFields = await getTableFields(TABLE_ID);
+    const collectFieldTypeMap = new Map(
+      collectFields.items.map((field) => [field.field_name, field.type])
+    );
     const promptTemplate = extractReplacePromptTemplate || undefined;
     const originalCoverAttachmentTasks = new Map<string, Promise<UploadedAttachment | null>>();
 

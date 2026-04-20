@@ -210,7 +210,7 @@ export default function AdvancedSettingsModule() {
             className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors"
           >
             <RotateCcw className="w-4 h-4" />
-            全部重置
+            重置提示词
           </button>
           <button
             onClick={handleSave}
@@ -231,10 +231,6 @@ export default function AdvancedSettingsModule() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
-        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-6 text-amber-800">
-          当前机器会自动保留提示词、词库和未提交草稿，刷新页面不会丢失。
-          已保存的业务结果仍以飞书数据为准，本地缓存只用于当前运营电脑的恢复和兜底。
-        </div>
         {SECTIONS.map((section) => (
           <PromptCard
             key={section.key}

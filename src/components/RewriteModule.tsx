@@ -324,6 +324,66 @@ function stringifyReplaceEntries(entries: Array<{ original: string; replacement:
     .join("\n");
 }
 
+function normalizeSavedText(value: string | undefined) {
+  return (value || "").replace(/\r\n/g, "\n").trim();
+}
+
+function normalizeSavedTags(tags: string[] | undefined) {
+  return dedupeTags(tags || []);
+}
+
+function buildRewriteSaveFingerprint(
+  value: Pick<
+    RewriteResult,
+    "rewrittenTitle" | "rewrittenBody" | "rewrittenCover" | "rewrittenCoverText" | "rewrittenTags"
+  >
+) {
+  return JSON.stringify({
+    rewrittenTitle: normalizeSavedText(value.rewrittenTitle),
+    rewrittenBody: normalizeSavedText(value.rewrittenBody),
+    rewrittenCover: normalizeSavedText(value.rewrittenCover),
+    rewrittenCoverText: normalizeSavedText(value.rewrittenCoverText),
+    rewrittenTags: normalizeSavedTags(value.rewrittenTags),
+  });
+}
+
+function buildSavedSnapshotFallbackFingerprint(note: RewriteResult["originalNote"]) {
+  return JSON.stringify({
+    rewrittenTitle: normalizeSavedText(note.rewriteTitle),
+    rewrittenBody: normalizeSavedText(note.rewriteBody),
+    rewrittenCoverText: normalizeSavedText(note.rewriteCoverText),
+    rewrittenTags: normalizeSavedTags(note.rewriteTags),
+  });
+}
+
+function buildCurrentResultFallbackFingerprint(result: RewriteResult) {
+  return JSON.stringify({
+    rewrittenTitle: normalizeSavedText(result.rewrittenTitle),
+    rewrittenBody: normalizeSavedText(result.rewrittenBody),
+    rewrittenCoverText: normalizeSavedText(result.rewrittenCoverText),
+    rewrittenTags: normalizeSavedTags(buildDisplayTags(result)),
+  });
+}
+
+function isRewriteResultSaved(result: RewriteResult, note: RewriteResult["originalNote"]) {
+  if (result.status !== "done") return false;
+
+  const currentFingerprint = buildRewriteSaveFingerprint({
+    rewrittenTitle: result.rewrittenTitle,
+    rewrittenBody: result.rewrittenBody,
+    rewrittenCover: result.rewrittenCover,
+    rewrittenCoverText: result.rewrittenCoverText,
+    rewrittenTags: buildDisplayTags(result),
+  });
+
+  if (result.savedFingerprint) {
+    return result.savedFingerprint === currentFingerprint;
+  }
+
+  if (!note.hasRewritten) return false;
+  return buildCurrentResultFallbackFingerprint(result) === buildSavedSnapshotFallbackFingerprint(note);
+}
+
 function getLiveOriginalNote(
   result: RewriteResult,
   collectRecordMap: Map<string, RewriteResult["originalNote"]>
@@ -585,6 +645,13 @@ export default function RewriteModule() {
         const rewriteDate = new Date().toISOString().slice(0, 16).replace("T", " ");
         persistedResults.forEach((result) => {
           updateRewriteResult(result.id, {
+            savedFingerprint: buildRewriteSaveFingerprint({
+              rewrittenTitle: result.rewrittenTitle,
+              rewrittenBody: result.rewrittenBody,
+              rewrittenCover: result.rewrittenCover,
+              rewrittenCoverText: result.rewrittenCoverText,
+              rewrittenTags: buildDisplayTags(result),
+            }),
             originalNote: {
               ...result.originalNote,
               hasRewritten: true,
@@ -1187,6 +1254,7 @@ function RewriteRow({
   const displayTitle = sanitizeTitle(note.originalTitle || "");
   const originalTags = buildOriginalTags(result);
   const rewrittenTags = buildDisplayTags(result);
+  const isSaved = isRewriteResultSaved(result, note);
 
   function openCoverEditDialog(mode: ImageEditMode) {
     setEditDialog({
@@ -1271,7 +1339,7 @@ function RewriteRow({
             </div>
           </div>
 
-          <StatusBadge status={result.status} saved={Boolean(note.hasRewritten)} />
+          <StatusBadge status={result.status} saved={isSaved} />
           {result.batchTotal > 1 && (
             <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600 ring-1 ring-blue-100">
               第 {result.batchIndex}/{result.batchTotal} 版

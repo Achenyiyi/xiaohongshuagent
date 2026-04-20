@@ -64,6 +64,7 @@ export interface RewriteResult {
   titleReplaceInfo: string; // 本次标题生成实际使用的替换信息
   bodyReplaceInfo: string; // 本次正文生成实际使用的替换信息
   coverReplaceInfo: string; // 本次封面文案生成实际使用的替换信息
+  savedFingerprint?: string; // 当前版本最近一次成功保存的指纹
   status: 'pending' | 'processing' | 'done' | 'error';
   errorMsg?: string;
 }
