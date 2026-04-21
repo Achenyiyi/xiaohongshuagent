@@ -262,7 +262,7 @@ function DraftResultRow({ result }: { result: RewriteResult }) {
             </div>
             {rewrittenTags.length > 0 && (
               <div>
-                <p className="text-xs text-gray-400">标签</p>
+                <p className="text-xs text-gray-400">二创标签</p>
                 <div className="flex flex-wrap gap-1.5 mt-1">
                   {rewrittenTags.map((tag) => (
                     <span

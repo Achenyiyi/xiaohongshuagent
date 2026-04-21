@@ -415,10 +415,6 @@ function buildCurrentTrackedEditBaseline(
   });
 }
 
-function buildTrackedEditFingerprint(value: RewriteEditBaseline) {
-  return JSON.stringify(buildTrackedEditBaseline(value));
-}
-
 function mergeTrackedEditBaseline(
   result: RewriteResult,
   updates: Partial<RewriteEditBaseline>
@@ -433,16 +429,43 @@ function mergeTrackedEditBaseline(
   });
 }
 
-function isRewriteResultEdited(
+const EDITED_CATEGORY_LABELS: Record<keyof RewriteEditBaseline, string> = {
+  rewrittenCover: "二创封面已编辑",
+  publishPersona: "发布人设已编辑",
+  rewrittenTitle: "二创标题已编辑",
+  rewrittenBody: "二创正文已编辑",
+  rewrittenTags: "二创标签已编辑",
+  rewrittenCoverText: "二创封面文案已编辑",
+};
+
+const EDITED_CATEGORY_ORDER: Array<keyof RewriteEditBaseline> = [
+  "rewrittenCover",
+  "publishPersona",
+  "rewrittenTitle",
+  "rewrittenBody",
+  "rewrittenTags",
+  "rewrittenCoverText",
+];
+
+function getEditedRewriteCategories(
   result: RewriteResult,
   overrides: Partial<RewriteEditBaseline> = {}
 ) {
-  if (!result.editBaseline) return false;
+  if (!result.editBaseline) return [];
 
-  return (
-    buildTrackedEditFingerprint(buildCurrentTrackedEditBaseline(result, overrides)) !==
-    buildTrackedEditFingerprint(result.editBaseline)
-  );
+  const current = buildCurrentTrackedEditBaseline(result, overrides);
+  const baseline = buildTrackedEditBaseline(result.editBaseline);
+
+  return EDITED_CATEGORY_ORDER.filter((key) => {
+    const currentValue = current[key];
+    const baselineValue = baseline[key];
+
+    if (Array.isArray(currentValue) && Array.isArray(baselineValue)) {
+      return JSON.stringify(currentValue) !== JSON.stringify(baselineValue);
+    }
+
+    return currentValue !== baselineValue;
+  }).map((key) => EDITED_CATEGORY_LABELS[key]);
 }
 
 function isAbortError(error: unknown) {
@@ -1656,7 +1679,7 @@ function RewriteRow({
   const rewrittenTags = buildDisplayTags(result);
   const selectedPublishPersona = (result.publishPersona || "").trim();
   const isSaved = isRewriteResultSaved(result, note);
-  const isEdited = isRewriteResultEdited(result, draftOverrides);
+  const editedCategories = getEditedRewriteCategories(result, draftOverrides);
   const sequenceLabel = sequenceNumber.toString().padStart(2, "0");
 
   function setDraftOverride<K extends keyof RewriteEditBaseline>(
@@ -1679,7 +1702,7 @@ function RewriteRow({
   }
 
   function handlePublishPersonaSelect(value: string) {
-    onUpdate({ publishPersona: value });
+    onUpdate({ publishPersona: selectedPublishPersona === value ? "" : value });
   }
 
   async function handleRetryField(field: RetryableRewriteField) {
@@ -1784,10 +1807,17 @@ function RewriteRow({
             #{sequenceLabel}
           </span>
           <StatusBadge status={result.status} saved={isSaved} />
-          {isEdited && (
-            <span className="rounded-full bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-600 ring-1 ring-violet-100">
-              已编辑
-            </span>
+          {editedCategories.length > 0 && (
+            <div className="flex max-w-[42%] min-w-0 flex-wrap items-center gap-1">
+              {editedCategories.map((category) => (
+                <span
+                  key={category}
+                  className="rounded-full bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-600 ring-1 ring-violet-100"
+                >
+                  {category}
+                </span>
+              ))}
+            </div>
           )}
           {result.batchTotal > 1 && (
             <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600 ring-1 ring-blue-100">
@@ -1904,8 +1934,8 @@ function RewriteRow({
                 </div>
               </div>
 
-              <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
-                <div className="flex justify-end">
+              <div className="relative bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+                <div className="absolute right-3 top-px z-10">
                   <PublishPersonaRail
                     options={PUBLISH_PERSONA_OPTIONS}
                     value={selectedPublishPersona}
@@ -2109,7 +2139,7 @@ function RewriteRow({
                 )}
 
                 <EditableTagsField
-                  label="标签"
+                  label="二创标签"
                   tags={rewrittenTags}
                   editing={editingRewrittenTags}
                   onEdit={() => {
@@ -2402,27 +2432,27 @@ function PublishPersonaRail({
   onSelect: (value: string) => void;
 }) {
   return (
-    <div className="flex flex-col items-end gap-2">
-      {options.map((option, index) => {
+    <div className="flex items-start justify-end gap-1.5">
+      {options.map((option) => {
         const selected = option === value;
 
         return (
-          <button
-            key={option}
-            type="button"
-            onClick={() => onSelect(option)}
-            className={clsx(
-              "rounded-l-full border px-3 py-1 text-xs font-medium transition-all duration-200",
-              "text-right shadow-sm",
-              selected
-                ? "min-w-[88px] border-red-300 bg-red-500 text-white shadow-[0_6px_18px_rgba(239,68,68,0.18)]"
-                : "min-w-[68px] border-red-100 bg-red-50 text-red-400 hover:min-w-[78px] hover:border-red-200 hover:bg-red-100"
-            )}
-            title={`设为${option}`}
-            style={{ marginRight: `${index * 2}px` }}
-          >
-            {option}
-          </button>
+          <div key={option} className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => onSelect(option)}
+              className={clsx(
+                "inline-flex w-[72px] items-center justify-center rounded-b-[16px] border px-2 text-[11px] font-medium leading-none whitespace-nowrap text-center",
+                "transition-[height,background-color,border-color,color,box-shadow] duration-200 ease-out",
+                selected
+                  ? "h-10 border-stone-300 bg-[#efe7d8] text-[#7a6447] shadow-[0_4px_10px_rgba(122,100,71,0.10)]"
+                  : "h-8 border-stone-200 bg-[#f7f4ee] text-stone-500 hover:border-stone-300 hover:bg-[#f2ede3]"
+              )}
+              title={selected ? `取消${option}` : `设为${option}`}
+            >
+              {option}
+            </button>
+          </div>
         );
       })}
     </div>
