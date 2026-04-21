@@ -86,7 +86,8 @@ function createRewriteResult(record: FeishuCollectRecord, batchIndex: number, ba
     coverTemplateVariantId: coverTemplateSelection.templateId,
     coverBaseImage: coverTemplateSelection.baseImage,
     rewrittenTags: inheritedTags,
-    publishPersona: record.publishPersona || "",
+    // 发起新的二创时默认从空人设开始，避免沿用飞书里的历史选择。
+    publishPersona: "",
     titleReplaceInfo: "",
     bodyReplaceInfo: "",
     coverReplaceInfo: "",
@@ -96,7 +97,7 @@ function createRewriteResult(record: FeishuCollectRecord, batchIndex: number, ba
       rewrittenCover: "",
       rewrittenCoverText: "",
       rewrittenTags: inheritedTags,
-      publishPersona: record.publishPersona || "",
+      publishPersona: "",
     },
     status: "pending",
   };

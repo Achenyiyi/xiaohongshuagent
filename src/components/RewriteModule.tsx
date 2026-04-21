@@ -2444,14 +2444,14 @@ function RewriteRow({
           >
             #{sequenceLabel}
           </span>
-          <span className="min-w-0 flex-1 truncate text-sm text-gray-600">{displayTitle}</span>
           <StatusBadge status={result.status} saved={isSaved} />
+          <span className="min-w-0 flex-1 truncate text-sm text-gray-600">{displayTitle}</span>
           {editedCategories.length > 0 && (
-            <div className="flex max-w-[38%] min-w-0 flex-wrap items-center justify-end gap-1">
+            <div className="flex max-w-[45%] min-w-0 flex-nowrap items-center gap-1 overflow-x-auto whitespace-nowrap">
               {editedCategories.map((category) => (
                 <span
                   key={category}
-                  className="rounded-full bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-600 ring-1 ring-violet-100"
+                  className="shrink-0 rounded-full bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-600 ring-1 ring-violet-100"
                 >
                   {category}
                 </span>
