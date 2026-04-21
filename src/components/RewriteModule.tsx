@@ -1556,7 +1556,7 @@ export default function RewriteModule() {
                 {autoMergeExtractedEntries ? "自动写入三份词库" : "自动学习关闭"}
               </span>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 pr-1">
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1586,12 +1586,14 @@ export default function RewriteModule() {
                   )}
                 </div>
               </div>
-              <span className="text-xs text-amber-500">{libraryOpen ? "收起" : "展开"}</span>
-              {libraryOpen ? (
-                <ChevronUp className="w-4 h-4 text-amber-500" />
-              ) : (
-                <ChevronDown className="w-4 h-4 text-amber-500" />
-              )}
+              <div className="flex items-center gap-1 text-xs text-amber-500">
+                <span>{libraryOpen ? "收起" : "展开"}</span>
+                {libraryOpen ? (
+                  <ChevronUp className="w-4 h-4 text-amber-500" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-amber-500" />
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -2591,20 +2593,21 @@ function RewriteRow({
                         <button
                           onClick={() => setShowTemplates((current) => !current)}
                           disabled={generatingCover || !canEditGeneratedFields}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-500 transition-colors hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                          className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-500 transition-colors hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300"
                         >
+                          {showTemplates ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                           {showTemplates ? "收起模板库" : "展开模板库"}
                         </button>
                       </div>
                     </div>
 
                     {showTemplates && canEditGeneratedFields && (
-                      <div className="relative mt-2 h-[560px] min-h-[360px] max-h-[780px] resize-y overflow-x-hidden overflow-y-auto rounded-lg bg-gray-50 p-2.5">
+                      <div className="relative mt-2 h-[360px] min-h-[300px] max-h-[780px] resize-y overflow-x-hidden overflow-y-auto rounded-lg bg-gray-50 p-2.5">
                         <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-gray-200 bg-white/90 px-3 py-2.5">
                           <div className="min-w-0">
                             <p className="text-sm font-semibold text-gray-700">模板库</p>
                             <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
-                              上传图若不是 3:4 会先裁剪；AI生成模板直接使用你输入的提示词。
+                              上传模板以作为二创封面的替换素材。AI生成模板，使用文生图或图生图功能生成你想要的二创封面替换素材
                             </p>
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
@@ -2632,9 +2635,6 @@ function RewriteRow({
                             </button>
                           </div>
                         </div>
-                        <p className="mt-2 text-[11px] text-gray-400">
-                          点击任意底图后，程序会继续用当前封面文案本地排字。内置模板沿用预设排版，上传和 AI生成模板默认走通用排版。
-                        </p>
                         <div className="mt-2 grid max-w-[560px] grid-cols-3 gap-2 sm:grid-cols-4">
                           {templateLibraryAssets.map((asset) => (
                             <div key={asset.id} className="relative">
