@@ -21,6 +21,13 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { useAppStore } from "@/store/appStore";
+import { composeCoverImage } from "@/lib/coverComposer";
+import {
+  COVER_TEMPLATE_FAMILIES,
+  getNextCoverTemplateVariant,
+  isTemplateVariantSource,
+  resolveCoverTemplateSelection,
+} from "@/lib/coverTemplates";
 import {
   parseExtractedReplaceEntries,
   useRewriteSettingsStore,
@@ -32,14 +39,6 @@ import { dedupeTags, extractTagsFromText, sanitizeTitle } from "@/lib/xhs";
 import type { RewriteEditBaseline, RewriteResult } from "@/types";
 import Image from "next/image";
 
-type TemplateOption = {
-  id: number;
-  src: string;
-  mainPos: string;
-  subPos: string;
-};
-
-type ImageEditMode = "text" | "image";
 type RetryableRewriteField = "coverText" | "title" | "body";
 
 type ExtractedReplaceInfoByScope = Record<ReplaceLibraryScope, string[]>;
@@ -50,45 +49,6 @@ const RETRY_FIELD_LABELS: Record<RetryableRewriteField, string> = {
   title: "二创标题",
   body: "二创正文",
 };
-
-const TEMPLATE_OPTIONS: TemplateOption[] = [
-  {
-    id: 1,
-    src: "/templates/template1.png",
-    mainPos: "画面正中央，超大加粗黑体，字色为白色或亮黄色，占画面高度约 40%",
-    subPos: "主标题正下方，中等字号细体，字色浅白，水平居中",
-  },
-  {
-    id: 2,
-    src: "/templates/template2.png",
-    mainPos: "顶部偏中，大字加粗，深黑色字，横排居中",
-    subPos: "主标题下方约 1/3 处，小字细体，灰色，居中排列",
-  },
-  {
-    id: 3,
-    src: "/templates/template3.png",
-    mainPos: "画面上半部居中，特大加粗字，白色字体，带轻微阴影增强可读性",
-    subPos: "主标题下方，中等字号，白色半透明，居中",
-  },
-  {
-    id: 4,
-    src: "/templates/template4.png",
-    mainPos: "画面左上角到中间斜线布局，超大加粗字，亮色（白/金/橙），视觉冲击强",
-    subPos: "主标题右下方或底部，小字，亮白色，与主标题错位排列",
-  },
-  {
-    id: 6,
-    src: "/templates/template6.png",
-    mainPos: "颜色较深的色块区域，超大字号加粗，白色字体居中",
-    subPos: "颜色较浅的色块区域，中等字号，深色字体居中",
-  },
-  {
-    id: 7,
-    src: "/templates/template7.png",
-    mainPos: "画面中上方，大字竖排或横排，深棕/黑色毛笔或粗宋体字",
-    subPos: "主标题下方，小字细体，棕灰色，横排居中",
-  },
-];
 
 const LIBRARY_SCOPES: Array<{ scope: ReplaceLibraryScope; label: string; desc: string }> = [
   { scope: "title", label: "标题词库", desc: "只作用在标题生成" },
@@ -122,28 +82,6 @@ async function readFileAsDataUrl(file: File) {
   });
 }
 
-async function callJimengGenerate(payload: {
-  prompt: string;
-  ratio?: string;
-  resolution?: string;
-  templateSrc?: string;
-  referenceImageSrc?: string;
-  signal?: AbortSignal;
-}) {
-  const { signal, ...body } = payload;
-  const res = await fetch("/api/jimeng/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || "封面生成失败");
-  }
-  return data as { imageUrl?: string };
-}
-
 function hasBlankLineParagraphs(value: string) {
   return /\n\s*\n/.test(value.replace(/\r\n/g, "\n"));
 }
@@ -164,62 +102,53 @@ function normalizeRewrittenBody(value: string, originalBody = "") {
   return normalized.replace(/\n\s*\n+/g, "\n");
 }
 
-function stripCoverTextLabel(value: string, label: "主标题" | "副标题") {
-  return value.replace(new RegExp(`^${label}[：:]\\s*`), "").trim();
+function normalizeSavedCoverText(value: string | undefined) {
+  return (value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function splitCoverTextSegments(value: string) {
-  return value
-    .split(/[\/／]/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+function resolveResultCoverTemplateState(
+  result: Pick<
+    RewriteResult,
+    "id" | "coverTemplateFamilyId" | "coverTemplateVariantId" | "coverBaseImage"
+  >
+) {
+  return resolveCoverTemplateSelection({
+    familyId: result.coverTemplateFamilyId,
+    variantId: result.coverTemplateVariantId,
+    baseImage: result.coverBaseImage,
+    seed: result.id,
+  });
 }
 
-function parseCoverText(coverText: string): { main: string; subLines: string[] } {
-  const lines = coverText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    return { main: "", subLines: [] };
-  }
-
-  const mainLine = lines.find((line) => /^主标题[：:]/.test(line));
-  const subLine = lines.find((line) => /^副标题[：:]/.test(line));
-
-  if (mainLine || subLine) {
-    return {
-      main: mainLine ? stripCoverTextLabel(mainLine, "主标题") : "",
-      subLines: subLine ? splitCoverTextSegments(stripCoverTextLabel(subLine, "副标题")) : [],
-    };
-  }
+async function buildRenderedCoverPayload(args: {
+  result: Pick<
+    RewriteResult,
+    "id" | "coverTemplateFamilyId" | "coverTemplateVariantId" | "coverBaseImage"
+  >;
+  coverText: string;
+  overrides?: Partial<
+    Pick<RewriteResult, "coverTemplateFamilyId" | "coverTemplateVariantId" | "coverBaseImage">
+  >;
+}) {
+  const resolvedTemplate = resolveCoverTemplateSelection({
+    familyId: args.overrides?.coverTemplateFamilyId ?? args.result.coverTemplateFamilyId,
+    variantId: args.overrides?.coverTemplateVariantId ?? args.result.coverTemplateVariantId,
+    baseImage: args.overrides?.coverBaseImage ?? args.result.coverBaseImage,
+    seed: args.result.id,
+  });
+  const normalizedText = normalizeSavedCoverText(args.coverText);
+  const rewrittenCover = await composeCoverImage({
+    text: normalizedText,
+    familyId: resolvedTemplate.family.id,
+    baseImageSrc: resolvedTemplate.baseImage,
+  });
 
   return {
-    main: lines[0],
-    subLines: lines.slice(1).flatMap(splitCoverTextSegments),
+    coverTemplateFamilyId: resolvedTemplate.family.id,
+    coverTemplateVariantId: resolvedTemplate.variant.id,
+    coverBaseImage: resolvedTemplate.baseImage,
+    rewrittenCover,
   };
-}
-
-function buildTemplateCoverPrompt(coverText: string, template: TemplateOption) {
-  const { main, subLines } = parseCoverText(coverText);
-  const subtitleInstruction =
-    subLines.length === 0
-      ? ""
-      : subLines.length === 1
-        ? `副标题替换为「${subLines[0]}」，保持在模板原副标题位置（${template.subPos}）。`
-        : `副标题保持在模板原副标题位置（${template.subPos}），按多行排版，依次写为：${subLines
-            .map((line, index) => `第${index + 1}行「${line}」`)
-            .join("；")}。`;
-
-  return [
-    "严格复用输入模板图的版式结构、配色方案、字体层级和整体视觉风格，只替换其中的文案内容，不改变排版骨架。",
-    `主标题替换为「${main || coverText}」，保持在模板原主标题位置（${template.mainPos}）。`,
-    subtitleInstruction,
-    "如果副标题有多行，必须按换行排版展示，禁止把斜杠、分隔符直接画进图片文字里。",
-    "文字须清晰可读，输出 3:4 竖版小红书封面，2K 画质。",
-    "禁止添加任何与文案无关的装饰文字或额外信息。",
-  ].filter(Boolean).join(" ");
 }
 
 function buildDisplayTags(result: RewriteResult): string[] {
@@ -420,7 +349,7 @@ function buildRewriteSaveFingerprint(
     rewrittenTitle: normalizeSavedText(value.rewrittenTitle),
     rewrittenBody: normalizeSavedText(value.rewrittenBody),
     rewrittenCover: normalizeSavedText(value.rewrittenCover),
-    rewrittenCoverText: normalizeSavedText(value.rewrittenCoverText),
+    rewrittenCoverText: normalizeSavedCoverText(value.rewrittenCoverText),
     rewrittenTags: normalizeSavedTags(value.rewrittenTags),
     publishPersona: normalizeSavedText(value.publishPersona),
   });
@@ -430,7 +359,7 @@ function buildSavedSnapshotFallbackFingerprint(note: RewriteResult["originalNote
   return JSON.stringify({
     rewrittenTitle: normalizeSavedText(note.rewriteTitle),
     rewrittenBody: normalizeSavedText(note.rewriteBody),
-    rewrittenCoverText: normalizeSavedText(note.rewriteCoverText),
+    rewrittenCoverText: normalizeSavedCoverText(note.rewriteCoverText),
     rewrittenTags: normalizeSavedTags(note.rewriteTags),
     publishPersona: normalizeSavedText(note.publishPersona),
   });
@@ -440,7 +369,7 @@ function buildCurrentResultFallbackFingerprint(result: RewriteResult) {
   return JSON.stringify({
     rewrittenTitle: normalizeSavedText(result.rewrittenTitle),
     rewrittenBody: normalizeSavedText(result.rewrittenBody),
-    rewrittenCoverText: normalizeSavedText(result.rewrittenCoverText),
+    rewrittenCoverText: normalizeSavedCoverText(result.rewrittenCoverText),
     rewrittenTags: normalizeSavedTags(buildDisplayTags(result)),
     publishPersona: normalizeSavedText(result.publishPersona),
   });
@@ -889,17 +818,25 @@ export default function RewriteModule() {
           ...coverPromptPayload,
         });
 
+        const rewrittenCoverText = normalizeSavedCoverText(coverTextRes.result || "");
+        const coverPayload = await buildRenderedCoverPayload({
+          result: current,
+          coverText: rewrittenCoverText,
+        });
+
         updateRewriteResult(resultId, {
           originalNote: {
             ...note,
             coverText: originalCoverText,
           },
-          rewrittenCoverText: coverTextRes.result || "",
+          rewrittenCoverText,
+          ...coverPayload,
           coverReplaceInfo,
           editBaseline: mergeTrackedEditBaseline(current, {
-            rewrittenCoverText: coverTextRes.result || "",
+            rewrittenCoverText,
+            rewrittenCover: coverPayload.rewrittenCover,
           }),
-          fieldModifiedAt: omitFieldModifiedAt(current, ["rewrittenCoverText"]),
+          fieldModifiedAt: omitFieldModifiedAt(current, ["rewrittenCoverText", "rewrittenCover"]),
           lastModifiedAt: getCurrentIsoTimestamp(),
           errorMsg: undefined,
         });
@@ -936,6 +873,7 @@ export default function RewriteModule() {
 
       const controller = new AbortController();
       rewriteAbortControllersRef.current.set(resultId, controller);
+      const initialCoverState = resolveResultCoverTemplateState(result);
 
       updateRewriteResult(resultId, {
         status: "processing",
@@ -943,7 +881,10 @@ export default function RewriteModule() {
         rewrittenTitle: "",
         rewrittenBody: "",
         rewrittenCoverText: "",
-        rewrittenCover: "",
+        rewrittenCover: initialCoverState.baseImage,
+        coverTemplateFamilyId: initialCoverState.family.id,
+        coverTemplateVariantId: initialCoverState.variant.id,
+        coverBaseImage: initialCoverState.baseImage,
       });
 
       try {
@@ -1033,7 +974,7 @@ export default function RewriteModule() {
           return;
         }
 
-        const rewrittenCoverText = rewrittenCoverTextRes.result || "";
+        const rewrittenCoverText = normalizeSavedCoverText(rewrittenCoverTextRes.result || "");
         updateRewriteResult(resultId, {
           originalNote: {
             ...note,
@@ -1043,21 +984,20 @@ export default function RewriteModule() {
           coverReplaceInfo,
         });
 
-        const randomTemplate = TEMPLATE_OPTIONS[Math.floor(Math.random() * TEMPLATE_OPTIONS.length)];
-        const coverPrompt = buildTemplateCoverPrompt(rewrittenCoverText, randomTemplate);
-        const coverRes = await callJimengGenerate({
-          prompt: coverPrompt,
-          ratio: "3:4",
-          resolution: "2k",
-          templateSrc: randomTemplate.src,
-          signal: controller.signal,
+        if (!isCurrentRunActive()) {
+          return;
+        }
+
+        const coverPayload = await buildRenderedCoverPayload({
+          result,
+          coverText: rewrittenCoverText,
         });
 
         if (!isCurrentRunActive()) {
           return;
         }
 
-        const rewrittenCover = coverRes.imageUrl || "";
+        const rewrittenCover = coverPayload.rewrittenCover;
         const nextEditBaseline = buildTrackedEditBaseline({
           rewrittenTitle,
           rewrittenBody,
@@ -1078,6 +1018,9 @@ export default function RewriteModule() {
           rewrittenBody,
           rewrittenCover,
           rewrittenCoverText,
+          coverTemplateFamilyId: coverPayload.coverTemplateFamilyId,
+          coverTemplateVariantId: coverPayload.coverTemplateVariantId,
+          coverBaseImage: coverPayload.coverBaseImage,
           titleReplaceInfo,
           bodyReplaceInfo,
           coverReplaceInfo,
@@ -1889,17 +1832,20 @@ function RewriteRow({
     title: false,
     body: false,
   });
-  const [editDialog, setEditDialog] = useState<{
-    prompt: string;
-    mode: ImageEditMode;
-    sourceImageSrc: string;
-    sourceImageLabel: string;
-  } | null>(null);
 
   const note = originalNote;
   const displayTitle = sanitizeTitle(note.originalTitle || "");
   const originalTags = buildOriginalTags(result);
   const rewrittenTags = buildDisplayTags(result);
+  const resolvedCoverTemplate = resolveResultCoverTemplateState(result);
+  const currentTemplateFamily = resolvedCoverTemplate.family;
+  const currentTemplateVariant = resolvedCoverTemplate.variant;
+  const isUsingCustomBaseImage =
+    Boolean(result.coverBaseImage) && !isTemplateVariantSource(result.coverBaseImage);
+  const currentTemplateVariantIndex = Math.max(
+    currentTemplateFamily.variants.findIndex((variant) => variant.id === currentTemplateVariant.id),
+    0
+  );
   const selectedPublishPersona = (result.publishPersona || "").trim();
   const isSaved = isRewriteResultSaved(result, note);
   const editedCategories = getEditedRewriteCategories(result, draftOverrides);
@@ -2045,66 +1991,94 @@ function RewriteRow({
     }
   }
 
-  function openCoverEditDialog(mode: ImageEditMode) {
-    setEditDialog({
-      prompt: result.rewrittenCoverText || "",
-      mode,
-      sourceImageSrc: result.rewrittenCover || "",
-      sourceImageLabel: "封面",
-    });
-  }
-
-  function openTemplateEditDialog(template: TemplateOption) {
-    setShowTemplates(false);
-    setEditDialog({
-      prompt: result.rewrittenCoverText || "",
-      mode: "image",
-      sourceImageSrc: template.src,
-      sourceImageLabel: `模板 ${template.id}`,
-    });
-  }
-
-  async function generateCoverFromTemplate(template: TemplateOption) {
-    if (!result.rewrittenCoverText || generatingCover) return;
+  async function rebuildCover(
+    overrides: Partial<
+      Pick<RewriteResult, "rewrittenCoverText" | "coverTemplateFamilyId" | "coverTemplateVariantId" | "coverBaseImage">
+    > = {},
+    options: { trackAsManual?: boolean } = {}
+  ) {
     setGeneratingCover(true);
-    setShowTemplates(false);
     try {
-      const prompt = buildTemplateCoverPrompt(result.rewrittenCoverText, template);
-      const data = await callJimengGenerate({
-        prompt,
-        ratio: "3:4",
-        resolution: "2k",
-        templateSrc: template.src,
+      const nextCoverText = overrides.rewrittenCoverText ?? result.rewrittenCoverText;
+      const coverPayload = await buildRenderedCoverPayload({
+        result,
+        coverText: nextCoverText,
+        overrides,
       });
-      applyManualUpdate({ rewrittenCover: data.imageUrl });
+
+      const updates: Partial<RewriteResult> = {
+        ...coverPayload,
+        ...(typeof overrides.rewrittenCoverText === "string"
+          ? { rewrittenCoverText: overrides.rewrittenCoverText }
+          : {}),
+      };
+
+      if (options.trackAsManual === false) {
+        onUpdate(updates);
+      } else {
+        applyManualUpdate(updates);
+      }
     } catch (e: unknown) {
-      console.error("生成封面失败:", e);
+      console.error("本地生成封面失败:", e);
     } finally {
       setGeneratingCover(false);
     }
   }
 
-  async function generateFromEditDialog() {
-    if (!editDialog || generatingCover) return;
-    setGeneratingCover(true);
+  async function handleBaseImageUpload(file: File) {
+    if (!canEditGeneratedFields || generatingCover) return;
     try {
-      const prompt = editDialog.prompt.trim();
-      const data = await callJimengGenerate({
-        prompt,
-        ratio: "3:4",
-        resolution: "2k",
-        referenceImageSrc:
-          editDialog.mode === "image" ? editDialog.sourceImageSrc : "",
-      });
-      applyManualUpdate({
-        rewrittenCover: data.imageUrl,
-      });
-      setEditDialog(null);
-    } catch (e: unknown) {
-      console.error("封面编辑生图失败:", e);
-    } finally {
-      setGeneratingCover(false);
+      const dataUrl = await readFileAsDataUrl(file);
+      await rebuildCover({ coverBaseImage: dataUrl });
+    } catch (error) {
+      console.error("读取底图失败:", error);
     }
+  }
+
+  async function handleFinishedImageUpload(file: File) {
+    if (!canEditGeneratedFields) return;
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      applyManualUpdate({ rewrittenCover: dataUrl });
+    } catch (error) {
+      console.error("读取成品图片失败:", error);
+    }
+  }
+
+  async function handleTemplateFamilyChange(familyId: string) {
+    if (!canEditGeneratedFields || generatingCover) return;
+    const nextFamily = COVER_TEMPLATE_FAMILIES.find((family) => family.id === familyId);
+    if (!nextFamily) return;
+    setShowTemplates(false);
+    await rebuildCover({
+      coverTemplateFamilyId: nextFamily.id,
+      coverTemplateVariantId: nextFamily.variants[0].id,
+      coverBaseImage: nextFamily.variants[0].src,
+    });
+  }
+
+  async function handleSwapTemplateVariant() {
+    if (!canEditGeneratedFields || generatingCover) return;
+    const nextVariant = getNextCoverTemplateVariant(
+      currentTemplateFamily.id,
+      currentTemplateVariant.id
+    );
+
+    await rebuildCover({
+      coverTemplateFamilyId: currentTemplateFamily.id,
+      coverTemplateVariantId: nextVariant.id,
+      coverBaseImage: nextVariant.src,
+    });
+  }
+
+  async function handleResetTemplateBaseImage() {
+    if (!canEditGeneratedFields || generatingCover) return;
+
+    await rebuildCover({
+      coverTemplateFamilyId: currentTemplateFamily.id,
+      coverTemplateVariantId: currentTemplateVariant.id,
+      coverBaseImage: currentTemplateVariant.src,
+    });
   }
 
   return (
@@ -2215,11 +2189,11 @@ function RewriteRow({
                         unoptimized
                       />
                       <HoverImageActions
-                        previewLabel="原封面预览"
+                        previewLabel="预览"
                         onPreview={() =>
                           setPreviewImage({
                             src: `/api/proxy-image?url=${encodeURIComponent(note.cover || "")}`,
-                            title: "原封面预览",
+                            title: "预览",
                           })
                         }
                       />
@@ -2302,12 +2276,7 @@ function RewriteRow({
                   <div className="space-y-1">
                     <div className="flex items-start gap-2">
                       <div className="relative aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden w-24 flex-shrink-0 group">
-                        {showInlineCoverLoading ? (
-                          <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-b from-gray-50 to-gray-100 text-[11px] text-gray-400">
-                            <div className="h-5 w-5 rounded-full border-2 border-red-300 border-t-transparent animate-spin" />
-                            <span>封面生成中</span>
-                          </div>
-                        ) : result.rewrittenCover ? (
+                        {result.rewrittenCover ? (
                           <>
                             <Image
                               src={result.rewrittenCover}
@@ -2317,11 +2286,16 @@ function RewriteRow({
                               className="object-cover"
                               unoptimized
                             />
-                            {canEditGeneratedFields && (
-                              <HoverImageActions
-                                onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "二创封面预览" })}
-                                onEdit={() => openCoverEditDialog("text")}
-                              />
+                            <HoverImageActions
+                              onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "二创封面预览" })}
+                            />
+                            {showInlineCoverLoading && (
+                              <div className="absolute inset-0 flex items-center justify-center bg-white/65 text-[11px] text-gray-500">
+                                <div className="flex flex-col items-center gap-1.5">
+                                  <div className="h-4 w-4 rounded-full border-2 border-red-300 border-t-transparent animate-spin" />
+                                  <span>封面更新中</span>
+                                </div>
+                              </div>
                             )}
                           </>
                         ) : (
@@ -2330,75 +2304,142 @@ function RewriteRow({
                           </div>
                         )}
                       </div>
-                      <div className="flex flex-col gap-1">
-                        <label
-                          className={clsx(
-                            "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
-                            canEditGeneratedFields
-                              ? "cursor-pointer text-gray-500 hover:text-gray-700"
-                              : "cursor-not-allowed text-gray-300"
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <div className="flex flex-wrap gap-1">
+                          <label
+                            className={clsx(
+                              "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
+                              canEditGeneratedFields
+                                ? "cursor-pointer text-gray-500 hover:text-gray-700"
+                                : "cursor-not-allowed text-gray-300"
+                            )}
+                          >
+                            <Upload className="w-3 h-3" />
+                            换背景
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              disabled={!canEditGeneratedFields}
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.currentTarget.value = "";
+                                if (!file) return;
+                                await handleBaseImageUpload(file);
+                              }}
+                            />
+                          </label>
+                          <label
+                            className={clsx(
+                              "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
+                              canEditGeneratedFields
+                                ? "cursor-pointer text-gray-500 hover:text-gray-700"
+                                : "cursor-not-allowed text-gray-300"
+                            )}
+                          >
+                            <Upload className="w-3 h-3" />
+                            直接替换封面
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              disabled={!canEditGeneratedFields}
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.currentTarget.value = "";
+                                if (!file) return;
+                                await handleFinishedImageUpload(file);
+                              }}
+                            />
+                          </label>
+                          <button
+                            onClick={() => setShowTemplates((current) => !current)}
+                            disabled={generatingCover || !canEditGeneratedFields}
+                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
+                          >
+                            选模板
+                          </button>
+                          <button
+                            onClick={() => void handleSwapTemplateVariant()}
+                            disabled={generatingCover || !canEditGeneratedFields}
+                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
+                          >
+                            同款切换
+                          </button>
+                          {isUsingCustomBaseImage && (
+                            <button
+                              onClick={() => void handleResetTemplateBaseImage()}
+                              disabled={generatingCover || !canEditGeneratedFields}
+                              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
+                            >
+                              恢复模板
+                            </button>
                           )}
-                        >
-                          <Upload className="w-3 h-3" />
-                          上传图片
-                          <input
-                            type="file"
-                            accept="image/*"
-                            className="hidden"
-                            disabled={!canEditGeneratedFields}
-                            onChange={async (e) => {
-                              const file = e.target.files?.[0];
-                              e.currentTarget.value = "";
-                              if (!file || !canEditGeneratedFields) return;
-                              try {
-                                const dataUrl = await readFileAsDataUrl(file);
-                                applyManualUpdate({ rewrittenCover: dataUrl });
-                              } catch (error) {
-                                console.error("读取上传图片失败:", error);
-                              }
-                            }}
-                          />
-                        </label>
-                        <button
-                          onClick={() => setShowTemplates(!showTemplates)}
-                          disabled={!result.rewrittenCoverText || generatingCover || !canEditGeneratedFields}
-                          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
-                        >
-                          <Sparkles className="w-3 h-3" />
-                          模板生图
-                        </button>
+                        </div>
+                        <div className="rounded-lg bg-gray-50 px-2 py-1.5 text-[11px] text-gray-500">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <span>当前模板：{currentTemplateFamily.label}</span>
+                            <span>
+                              搭配 {currentTemplateVariantIndex + 1}/{currentTemplateFamily.variants.length}
+                            </span>
+                            <span>{currentTemplateVariant.label}</span>
+                            {isUsingCustomBaseImage && (
+                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-red-500 ring-1 ring-red-100">
+                                已启用自定义底图
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     </div>
 
                     {showTemplates && canEditGeneratedFields && (
                       <div className="mt-2 p-2 bg-gray-50 rounded-lg">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <p className="text-xs text-gray-500">选择模板</p>
-                          <button onClick={() => setShowTemplates(false)}>
-                            <X className="w-3.5 h-3.5 text-gray-400" />
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-5 gap-1.5">
-                          {TEMPLATE_OPTIONS.map((template) => (
-                            <button
-                              key={template.id}
-                              onClick={() => generateCoverFromTemplate(template)}
-                              className="relative aspect-[3/4] rounded overflow-hidden hover:ring-2 hover:ring-red-400 transition-all group"
-                            >
-                              <Image
-                                src={template.src}
-                                alt={`模板${template.id}`}
-                                fill
-                                sizes="80px"
-                                className="object-cover"
-                              />
-                              <HoverImageActions
-                                small
-                                onPreview={() => setPreviewImage({ src: template.src, title: `模板 ${template.id}` })}
-                                onEdit={() => openTemplateEditDialog(template)}
-                              />
-                            </button>
-                          ))}
+                        <p className="mb-1.5 text-xs text-gray-500">选择模板族</p>
+                        <div className="grid max-w-[540px] grid-cols-3 gap-2">
+                          {COVER_TEMPLATE_FAMILIES.map((family) => {
+                            const previewVariant =
+                              family.id === currentTemplateFamily.id
+                                ? currentTemplateVariant
+                                : family.variants[0];
+
+                            return (
+                              <button
+                                key={family.id}
+                                onClick={() => void handleTemplateFamilyChange(family.id)}
+                                className={clsx(
+                                  "rounded-xl border p-1.5 text-left transition-colors",
+                                  family.id === currentTemplateFamily.id
+                                    ? "border-red-200 bg-red-50/50"
+                                    : "border-gray-200 bg-white hover:border-gray-300"
+                                )}
+                              >
+                                <div className="group relative aspect-[3/4] overflow-hidden rounded-lg bg-gray-100">
+                                  <Image
+                                    src={previewVariant.src}
+                                    alt={family.label}
+                                    fill
+                                    sizes="96px"
+                                    className="object-cover"
+                                  />
+                                  <HoverImageActions
+                                    small
+                                    previewLabel="预览"
+                                    onPreview={() =>
+                                      setPreviewImage({
+                                        src: previewVariant.src,
+                                        title: `${family.label} · ${previewVariant.label}`,
+                                      })
+                                    }
+                                  />
+                                </div>
+                                <p className="mt-1.5 text-xs font-medium text-gray-700">{family.label}</p>
+                                <p className="mt-0.5 text-[11px] leading-relaxed text-gray-400">
+                                  {family.description}
+                                </p>
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -2419,9 +2460,10 @@ function RewriteRow({
                     onRetry={() => handleRetryField("coverText")}
                     onDraftChange={(value) => setDraftOverride("rewrittenCoverText", value)}
                     onSave={(value) => {
-                      applyManualUpdate({ rewrittenCoverText: value });
-                      clearDraftOverride("rewrittenCoverText");
+                      const nextValue = normalizeSavedCoverText(value);
                       setEditingCoverText(false);
+                      clearDraftOverride("rewrittenCoverText");
+                      void rebuildCover({ rewrittenCoverText: nextValue });
                     }}
                     onCancel={() => {
                       clearDraftOverride("rewrittenCoverText");
@@ -2519,35 +2561,6 @@ function RewriteRow({
           onClose={() => setPreviewImage(null)}
         />
       )}
-
-      {editDialog && (
-        <ImageEditModal
-          prompt={editDialog.prompt}
-          mode={editDialog.mode}
-          sourceImageSrc={editDialog.sourceImageSrc}
-          sourceImageLabel={editDialog.sourceImageLabel}
-          loading={generatingCover}
-          onPromptChange={(value) =>
-            setEditDialog((current) => (current ? { ...current, prompt: value } : current))
-          }
-          onModeChange={(mode) =>
-            setEditDialog((current) => (current ? { ...current, mode } : current))
-          }
-          onSourceImageChange={(value) =>
-            setEditDialog((current) =>
-              current
-                ? {
-                    ...current,
-                    sourceImageSrc: value,
-                    sourceImageLabel: current.sourceImageLabel === "封面" ? "封面" : "自定义垫图",
-                  }
-                : current
-            )
-          }
-          onClose={() => setEditDialog(null)}
-          onSubmit={generateFromEditDialog}
-        />
-      )}
     </>
   );
 }
@@ -2621,149 +2634,6 @@ function ImagePreviewModal({
         <p className="mb-3 text-sm font-medium text-gray-700">{title}</p>
         <div className="relative h-[80vh] w-[60vh] max-w-[70vw]">
           <Image src={src} alt={title} fill className="object-contain" unoptimized />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ImageEditModal({
-  prompt,
-  mode,
-  sourceImageSrc,
-  sourceImageLabel,
-  loading,
-  onPromptChange,
-  onModeChange,
-  onSourceImageChange,
-  onClose,
-  onSubmit,
-}: {
-  prompt: string;
-  mode: ImageEditMode;
-  sourceImageSrc: string;
-  sourceImageLabel: string;
-  loading: boolean;
-  onPromptChange: (value: string) => void;
-  onModeChange: (mode: ImageEditMode) => void;
-  onSourceImageChange: (value: string) => void;
-  onClose: () => void;
-  onSubmit: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6" onClick={onClose}>
-      <div
-        className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h3 className="text-base font-semibold text-gray-800">封面生图</h3>
-            <p className="mt-1 text-xs text-gray-500">
-              文生图直接使用提示词生成；图生图会基于当前垫图继续生成。
-            </p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="mt-4 inline-flex rounded-xl border border-gray-200 bg-gray-50 p-1">
-          <button
-            onClick={() => onModeChange("text")}
-            className={clsx(
-              "rounded-lg px-3 py-1.5 text-sm transition-colors",
-              mode === "text"
-                ? "bg-white text-red-600 shadow-sm"
-                : "text-gray-500 hover:text-gray-700"
-            )}
-          >
-            文生图
-          </button>
-          <button
-            onClick={() => onModeChange("image")}
-            className={clsx(
-              "rounded-lg px-3 py-1.5 text-sm transition-colors",
-              mode === "image"
-                ? "bg-white text-red-600 shadow-sm"
-                : "text-gray-500 hover:text-gray-700"
-            )}
-          >
-            图生图
-          </button>
-        </div>
-
-        {mode === "image" && (
-          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
-            <div className="flex items-start gap-3">
-              <div className="relative aspect-[3/4] w-24 flex-shrink-0 overflow-hidden rounded-lg bg-white">
-                {sourceImageSrc ? (
-                  <Image
-                    src={sourceImageSrc}
-                    alt={sourceImageLabel || "垫图"}
-                    fill
-                    sizes="96px"
-                    className="object-cover"
-                    unoptimized
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center px-2 text-center text-xs text-gray-400">
-                    暂无垫图
-                  </div>
-                )}
-              </div>
-              <div className="min-w-0 flex-1 space-y-2">
-                <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">
-                  <Upload className="w-3 h-3" />
-                  更换垫图
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      e.currentTarget.value = "";
-                      if (!file) return;
-                      try {
-                        const dataUrl = await readFileAsDataUrl(file);
-                        onSourceImageChange(dataUrl);
-                      } catch (error) {
-                        console.error("读取垫图失败:", error);
-                      }
-                    }}
-                  />
-                </label>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <textarea
-          value={prompt}
-          onChange={(e) => onPromptChange(e.target.value)}
-          rows={6}
-          className="mt-4 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm leading-relaxed outline-none focus:border-red-400 focus:ring-1 focus:ring-red-200"
-          placeholder={
-            mode === "text"
-              ? "输入什么提示词，即梦就按这个提示词生成图片"
-              : "输入图生图提示词，基于当前垫图生成新图"
-          }
-        />
-
-        <div className="mt-5 flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50"
-          >
-            取消
-          </button>
-          <button
-            onClick={onSubmit}
-            disabled={!prompt.trim() || loading || (mode === "image" && !sourceImageSrc)}
-            className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:bg-gray-300"
-          >
-            {loading ? "生成中..." : mode === "text" ? "文生图生成" : "图生图生成"}
-          </button>
         </div>
       </div>
     </div>

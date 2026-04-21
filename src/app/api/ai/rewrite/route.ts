@@ -62,8 +62,69 @@ function buildCustomRewriteUserContent(args: {
   if (!args.promptIncludesReplaceInfo && args.replaceInfo) {
     sections.push(buildPromptBlock("替换关键词", args.replaceInfo));
   }
-  sections.push("直接输出最终封面文案，不要解释。");
+  sections.push("直接输出最终封面逐行文案，不要解释。");
   return sections.join("\n\n");
+}
+
+function normalizeGeneratedCoverCopy(raw: string) {
+  const sanitized = sanitizeExtractedImageText(raw || "");
+  if (!sanitized) return "";
+
+  const lines = sanitized
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim());
+
+  const mainMatch = lines.find((line) => /^主标题[：:]/.test(line));
+  const subMatch = lines.find((line) => /^副标题[：:]/.test(line));
+
+  if (mainMatch || subMatch) {
+    const normalizedLines = [
+      mainMatch?.replace(/^主标题[：:]\s*/, "").trim() || "",
+      ...(subMatch
+        ? subMatch
+            .replace(/^副标题[：:]\s*/, "")
+            .split(/[\/／]/)
+            .map((line) => line.trim())
+        : []),
+    ].filter(Boolean);
+
+    return normalizedLines.join("\n");
+  }
+
+  const structuredLines: string[] = [];
+  let containsStructuredRows = false;
+
+  lines.forEach((line) => {
+    if (!line) return;
+    if (/^版式[：:]/.test(line)) {
+      containsStructuredRows = true;
+      return;
+    }
+
+    const lineMatch = line.match(/^第[1-9]行[：:]\s*(.+)$/);
+    if (lineMatch) {
+      containsStructuredRows = true;
+      structuredLines.push(lineMatch[1].trim());
+      return;
+    }
+
+    const emphasisMatch = line.match(/^强调词[：:]\s*(.+)$/);
+    if (emphasisMatch) {
+      containsStructuredRows = true;
+      const emphasis = emphasisMatch[1].trim();
+      if (emphasis) structuredLines.push(emphasis);
+      return;
+    }
+
+    structuredLines.push(line);
+  });
+
+  if (containsStructuredRows) {
+    return structuredLines.filter(Boolean).join("\n");
+  }
+
+  return structuredLines.join("\n");
 }
 
 /**
@@ -189,16 +250,7 @@ export async function POST(req: NextRequest) {
         userContent,
         DASHSCOPE_TEXT_MODEL
       );
-      // 解析结构化输出：主标题 + 副标题
-      const mainMatch = raw.match(/主标题[：:]\s*(.+)/);
-      const subMatch = raw.match(/副标题[：:]\s*(.+)/);
-      let result = raw.trim();
-      if (mainMatch && subMatch) {
-        const mainTitle = mainMatch[1].trim();
-        const subTitle = subMatch[1].trim().replace(/\//g, "\n");
-        result = `${mainTitle}\n${subTitle}`;
-      }
-      return NextResponse.json({ result: sanitizeExtractedImageText(result) });
+      return NextResponse.json({ result: normalizeGeneratedCoverCopy(raw) });
     }
 
     return NextResponse.json({ error: `未知type: ${type}` }, { status: 400 });

@@ -33,3 +33,16 @@ export function setIfFieldHasValue(
 
   target[fieldName] = value;
 }
+
+export function setIfFieldHasTextPreserveWhitespace(
+  target: Record<string, unknown>,
+  fieldTypeMap: Map<string, number>,
+  fieldName: string,
+  value: string | null | undefined
+) {
+  if (!fieldTypeMap.has(fieldName)) return;
+  if (value === undefined || value === null) return;
+  if (!value.trim()) return;
+
+  target[fieldName] = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}

@@ -5,6 +5,7 @@ import { RefreshCw, Sparkles, ChevronDown, ChevronUp, Check } from "lucide-react
 import clsx from "clsx";
 import { useAppStore } from "@/store/appStore";
 import EngagementStats from "@/components/EngagementStats";
+import { pickDefaultCoverTemplateSelection } from "@/lib/coverTemplates";
 import { dedupeTags, sanitizeTitle } from "@/lib/xhs";
 import { buildOpenableNoteLink } from "@/lib/xhsLink";
 import type { FeishuCollectRecord, RewriteResult } from "@/types";
@@ -62,6 +63,9 @@ function buildDisplayTags(record: FeishuCollectRecord) {
 
 function createRewriteResult(record: FeishuCollectRecord, batchIndex: number, batchTotal: number): RewriteResult {
   const inheritedTags = buildDisplayTags(record);
+  const coverTemplateSelection = pickDefaultCoverTemplateSelection(
+    `${record.recordId || record.noteLink || "note"}-${batchIndex}-${batchTotal}`
+  );
 
   return {
     id: `${record.recordId}-${Date.now()}-${batchIndex}-${Math.random().toString(36).slice(2, 8)}`,
@@ -78,6 +82,9 @@ function createRewriteResult(record: FeishuCollectRecord, batchIndex: number, ba
     rewrittenBody: "",
     rewrittenCover: "",
     rewrittenCoverText: "",
+    coverTemplateFamilyId: coverTemplateSelection.familyId,
+    coverTemplateVariantId: coverTemplateSelection.variantId,
+    coverBaseImage: coverTemplateSelection.baseImage,
     rewrittenTags: inheritedTags,
     publishPersona: record.publishPersona || "",
     titleReplaceInfo: "",

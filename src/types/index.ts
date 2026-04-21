@@ -70,6 +70,9 @@ export interface RewriteResult {
   rewrittenBody: string;
   rewrittenCover: string; // 生成的封面图URL
   rewrittenCoverText: string;
+  coverTemplateFamilyId?: string; // 当前封面模板族
+  coverTemplateVariantId?: string; // 当前模板搭配
+  coverBaseImage?: string; // 当前底图（模板图或用户上传图）
   rewrittenTags: string[];
   publishPersona: string;
   titleReplaceInfo: string; // 本次标题生成实际使用的替换信息

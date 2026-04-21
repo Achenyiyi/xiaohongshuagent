@@ -14,7 +14,11 @@ import {
   normalizeImageUrl,
 } from "@/lib/image";
 import { fetchImageResponse } from "@/lib/serverImage";
-import { setIfFieldExists, setIfFieldHasValue } from "@/lib/collectTableFields";
+import {
+  setIfFieldExists,
+  setIfFieldHasTextPreserveWhitespace,
+  setIfFieldHasValue,
+} from "@/lib/collectTableFields";
 import { dedupeTags, formatTagsForStorage, stripTagsFromText } from "@/lib/xhs";
 import { sanitizeExtractedImageText } from "@/lib/coverText";
 import {
@@ -514,7 +518,7 @@ function buildRewriteTableFields(params: {
   const normalizedOriginalCoverText = sanitizeExtractedImageText(
     result.originalNote.coverText || ""
   );
-  const normalizedRewrittenCoverText = sanitizeExtractedImageText(
+  const normalizedRewrittenCoverText = normalizeRewrittenCoverTextForStorage(
     result.rewrittenCoverText || ""
   );
 
@@ -536,7 +540,12 @@ function buildRewriteTableFields(params: {
   setIfFieldHasValue(fields, targetFieldTypeMap, "二创标题", result.rewrittenTitle);
   setIfFieldHasValue(fields, targetFieldTypeMap, "二创正文", result.rewrittenBody);
   setIfFieldHasValue(fields, targetFieldTypeMap, "二创标签", formatTagsForStorage(inheritedTags));
-  setIfFieldHasValue(fields, targetFieldTypeMap, "二创封面文案", normalizedRewrittenCoverText);
+  setIfFieldHasTextPreserveWhitespace(
+    fields,
+    targetFieldTypeMap,
+    "二创封面文案",
+    normalizedRewrittenCoverText
+  );
   setIfFieldHasValue(fields, targetFieldTypeMap, "发布人设", result.publishPersona);
   setIfFieldHasValue(
     fields,
@@ -576,7 +585,7 @@ function buildCollectUpdateFields(
   const normalizedOriginalCoverText = sanitizeExtractedImageText(
     result.originalNote.coverText || ""
   );
-  const normalizedRewrittenCoverText = sanitizeExtractedImageText(
+  const normalizedRewrittenCoverText = normalizeRewrittenCoverTextForStorage(
     result.rewrittenCoverText || ""
   );
 
@@ -585,11 +594,20 @@ function buildCollectUpdateFields(
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创标题", result.rewrittenTitle);
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创正文", result.rewrittenBody);
   setIfFieldHasValue(fields, collectFieldTypeMap, "二创标签", formatTagsForStorage(inheritedTags));
-  setIfFieldHasValue(fields, collectFieldTypeMap, "二创封面文案", normalizedRewrittenCoverText);
+  setIfFieldHasTextPreserveWhitespace(
+    fields,
+    collectFieldTypeMap,
+    "二创封面文案",
+    normalizedRewrittenCoverText
+  );
   setIfFieldHasValue(fields, collectFieldTypeMap, "发布人设", result.publishPersona);
   setIfFieldExists(fields, collectFieldTypeMap, "已二创", true);
 
   return fields;
+}
+
+function normalizeRewrittenCoverTextForStorage(value: string) {
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
 export async function POST(req: NextRequest) {
