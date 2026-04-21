@@ -1,8 +1,8 @@
-import { getCoverTemplateFamily, type CoverTemplateLayout } from "@/lib/coverTemplates";
+import { getCoverLayoutProfile, type CoverTemplateLayout } from "@/lib/coverTemplates";
 
 type ComposeCoverImageParams = {
   text: string;
-  familyId: string;
+  layoutId: string;
   baseImageSrc: string;
 };
 
@@ -114,10 +114,10 @@ function fitCoverText(
 
 export async function composeCoverImage({
   text,
-  familyId,
+  layoutId,
   baseImageSrc,
 }: ComposeCoverImageParams) {
-  const family = getCoverTemplateFamily(familyId);
+  const layoutProfile = getCoverLayoutProfile(layoutId);
   const baseImage = await loadImage(baseImageSrc);
 
   const canvas = document.createElement("canvas");
@@ -133,23 +133,29 @@ export async function composeCoverImage({
 
   const normalizedText = normalizeCoverText(text);
   if (normalizedText.trim()) {
-    const fitted = fitCoverText(context, normalizedText, family.layout, canvas.width, canvas.height);
-    const boxX = family.layout.box.x * canvas.width;
-    const boxY = family.layout.box.y * canvas.height;
-    const boxWidth = family.layout.box.width * canvas.width;
-    const boxHeight = family.layout.box.height * canvas.height;
+    const fitted = fitCoverText(
+      context,
+      normalizedText,
+      layoutProfile.layout,
+      canvas.width,
+      canvas.height
+    );
+    const boxX = layoutProfile.layout.box.x * canvas.width;
+    const boxY = layoutProfile.layout.box.y * canvas.height;
+    const boxWidth = layoutProfile.layout.box.width * canvas.width;
+    const boxHeight = layoutProfile.layout.box.height * canvas.height;
     const totalHeight =
       fitted.lines.length === 0 ? fitted.lineHeight : fitted.lines.length * fitted.lineHeight;
     const startY = boxY + Math.max((boxHeight - totalHeight) / 2, 0);
 
-    context.font = buildFont(fitted.fontSize, family.layout);
-    context.fillStyle = family.layout.color;
+    context.font = buildFont(fitted.fontSize, layoutProfile.layout);
+    context.fillStyle = layoutProfile.layout.color;
     context.textBaseline = "top";
-    context.textAlign = family.layout.align === "center" ? "center" : "left";
+    context.textAlign = layoutProfile.layout.align === "center" ? "center" : "left";
 
     fitted.lines.forEach((line, index) => {
       const drawX =
-        family.layout.align === "center" ? boxX + boxWidth / 2 : boxX;
+        layoutProfile.layout.align === "center" ? boxX + boxWidth / 2 : boxX;
       const drawY = startY + index * fitted.lineHeight;
       context.fillText(line, drawX, drawY);
     });

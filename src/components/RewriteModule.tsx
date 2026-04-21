@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Sparkles,
   Save,
   Upload,
   Square,
@@ -18,16 +17,23 @@ import {
   BookOpen,
   ToggleLeft,
   ToggleRight,
+  Sparkles,
 } from "lucide-react";
 import clsx from "clsx";
+import AiTemplateModal, { type AiTemplateMode } from "@/components/AiTemplateModal";
+import ImageCropModal from "@/components/ImageCropModal";
+import { useCoverTemplateLibraryPersistence } from "@/hooks/useCoverTemplateLibraryPersistence";
 import { useAppStore } from "@/store/appStore";
 import { composeCoverImage } from "@/lib/coverComposer";
 import {
-  COVER_TEMPLATE_FAMILIES,
-  getNextCoverTemplateVariant,
-  isTemplateVariantSource,
+  DEFAULT_COVER_LAYOUT_ID,
+  createCustomCoverTemplateAsset,
+  findCoverTemplateAssetById,
+  getAllCoverTemplateAssets,
   resolveCoverTemplateSelection,
+  type CoverTemplateAsset,
 } from "@/lib/coverTemplates";
+import { useCoverTemplateLibraryStore } from "@/store/coverTemplateLibraryStore";
 import {
   parseExtractedReplaceEntries,
   useRewriteSettingsStore,
@@ -82,6 +88,46 @@ async function readFileAsDataUrl(file: File) {
   });
 }
 
+async function callJimengGenerate(payload: {
+  prompt: string;
+  ratio?: string;
+  resolution?: string;
+  templateSrc?: string;
+  referenceImageSrc?: string;
+  signal?: AbortSignal;
+}) {
+  const { signal, ...body } = payload;
+  const res = await fetch("/api/jimeng/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || "模板生成失败");
+  }
+  return data as { imageUrl?: string };
+}
+
+async function readImageSize(src: string) {
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => {
+      resolve({
+        width: image.naturalWidth || image.width,
+        height: image.naturalHeight || image.height,
+      });
+    };
+    image.onerror = () => reject(new Error("图片尺寸读取失败"));
+    image.src = src;
+  });
+}
+
+function isThreeFourRatio(width: number, height: number) {
+  return Math.abs(width / height - 3 / 4) < 0.02;
+}
+
 function hasBlankLineParagraphs(value: string) {
   return /\n\s*\n/.test(value.replace(/\r\n/g, "\n"));
 }
@@ -110,13 +156,15 @@ function resolveResultCoverTemplateState(
   result: Pick<
     RewriteResult,
     "id" | "coverTemplateFamilyId" | "coverTemplateVariantId" | "coverBaseImage"
-  >
+  >,
+  customTemplates: CoverTemplateAsset[] = []
 ) {
   return resolveCoverTemplateSelection({
-    familyId: result.coverTemplateFamilyId,
-    variantId: result.coverTemplateVariantId,
+    layoutId: result.coverTemplateFamilyId,
+    templateId: result.coverTemplateVariantId,
     baseImage: result.coverBaseImage,
     seed: result.id,
+    customAssets: customTemplates,
   });
 }
 
@@ -129,23 +177,25 @@ async function buildRenderedCoverPayload(args: {
   overrides?: Partial<
     Pick<RewriteResult, "coverTemplateFamilyId" | "coverTemplateVariantId" | "coverBaseImage">
   >;
+  customTemplates?: CoverTemplateAsset[];
 }) {
   const resolvedTemplate = resolveCoverTemplateSelection({
-    familyId: args.overrides?.coverTemplateFamilyId ?? args.result.coverTemplateFamilyId,
-    variantId: args.overrides?.coverTemplateVariantId ?? args.result.coverTemplateVariantId,
+    layoutId: args.overrides?.coverTemplateFamilyId ?? args.result.coverTemplateFamilyId,
+    templateId: args.overrides?.coverTemplateVariantId ?? args.result.coverTemplateVariantId,
     baseImage: args.overrides?.coverBaseImage ?? args.result.coverBaseImage,
     seed: args.result.id,
+    customAssets: args.customTemplates,
   });
   const normalizedText = normalizeSavedCoverText(args.coverText);
   const rewrittenCover = await composeCoverImage({
     text: normalizedText,
-    familyId: resolvedTemplate.family.id,
+    layoutId: resolvedTemplate.layout.id,
     baseImageSrc: resolvedTemplate.baseImage,
   });
 
   return {
-    coverTemplateFamilyId: resolvedTemplate.family.id,
-    coverTemplateVariantId: resolvedTemplate.variant.id,
+    coverTemplateFamilyId: resolvedTemplate.layout.id,
+    coverTemplateVariantId: resolvedTemplate.asset.id,
     coverBaseImage: resolvedTemplate.baseImage,
     rewrittenCover,
   };
@@ -165,6 +215,23 @@ function buildOriginalTags(result: RewriteResult): string[] {
 
 function getCurrentIsoTimestamp() {
   return new Date().toISOString();
+}
+
+function createCoverTemplateAssetId(sourceType: "upload" | "ai") {
+  return `${sourceType}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildCoverTemplateAssetLabel(sourceType: "upload" | "ai", createdAt: string) {
+  const parsed = parseLooseTimestamp(createdAt) || new Date(createdAt);
+  const prefix = sourceType === "ai" ? "AI生成模板" : "上传模板";
+
+  return `${prefix} ${formatTwoDigits(parsed.getMonth() + 1)}-${formatTwoDigits(parsed.getDate())} ${formatTwoDigits(parsed.getHours())}:${formatTwoDigits(parsed.getMinutes())}`;
+}
+
+function getCoverTemplateSourceLabel(sourceType: CoverTemplateAsset["sourceType"]) {
+  if (sourceType === "upload") return "上传";
+  if (sourceType === "ai") return "AI";
+  return "内置";
 }
 
 function parseLooseTimestamp(value?: string | null) {
@@ -623,6 +690,8 @@ export default function RewriteModule() {
     coverPromptHasInlineReplaceInfo,
     extractPromptHasInlineOriginalAndRewritten,
   } = usePromptsSettingsStore();
+  const customTemplates = useCoverTemplateLibraryStore((state) => state.customTemplates);
+  useCoverTemplateLibraryPersistence();
 
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
@@ -822,6 +891,7 @@ export default function RewriteModule() {
         const coverPayload = await buildRenderedCoverPayload({
           result: current,
           coverText: rewrittenCoverText,
+          customTemplates,
         });
 
         updateRewriteResult(resultId, {
@@ -855,6 +925,7 @@ export default function RewriteModule() {
     [
       buildRewritePromptPayload,
       buildReplaceInfoString,
+      customTemplates,
       ensureOriginalCoverText,
       replaceLibraryEnabled,
       updateRewriteResult,
@@ -873,7 +944,7 @@ export default function RewriteModule() {
 
       const controller = new AbortController();
       rewriteAbortControllersRef.current.set(resultId, controller);
-      const initialCoverState = resolveResultCoverTemplateState(result);
+      const initialCoverState = resolveResultCoverTemplateState(result, customTemplates);
 
       updateRewriteResult(resultId, {
         status: "processing",
@@ -882,8 +953,8 @@ export default function RewriteModule() {
         rewrittenBody: "",
         rewrittenCoverText: "",
         rewrittenCover: initialCoverState.baseImage,
-        coverTemplateFamilyId: initialCoverState.family.id,
-        coverTemplateVariantId: initialCoverState.variant.id,
+        coverTemplateFamilyId: initialCoverState.layout.id,
+        coverTemplateVariantId: initialCoverState.asset.id,
         coverBaseImage: initialCoverState.baseImage,
       });
 
@@ -991,6 +1062,7 @@ export default function RewriteModule() {
         const coverPayload = await buildRenderedCoverPayload({
           result,
           coverText: rewrittenCoverText,
+          customTemplates,
         });
 
         if (!isCurrentRunActive()) {
@@ -1050,6 +1122,7 @@ export default function RewriteModule() {
     [
       buildRewritePromptPayload,
       buildReplaceInfoString,
+      customTemplates,
       ensureOriginalCoverText,
       replaceLibraryEnabled,
       updateRewriteResult,
@@ -1827,25 +1900,61 @@ function RewriteRow({
   const [showTemplates, setShowTemplates] = useState(false);
   const [generatingCover, setGeneratingCover] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
+  const [cropModalState, setCropModalState] = useState<
+    | {
+        mode: "template-library";
+        src: string;
+        sourceType: "upload" | "ai";
+        createdAt: string;
+        prompt?: string;
+      }
+    | {
+        mode: "finished-cover";
+        src: string;
+      }
+    | null
+  >(null);
+  const [aiTemplateOpen, setAiTemplateOpen] = useState(false);
+  const [aiTemplateMode, setAiTemplateMode] = useState<AiTemplateMode>("text");
+  const [aiTemplatePrompt, setAiTemplatePrompt] = useState("");
+  const [aiTemplateSourceImageSrc, setAiTemplateSourceImageSrc] = useState("");
+  const [aiTemplateLoading, setAiTemplateLoading] = useState(false);
   const [retryingFields, setRetryingFields] = useState<Record<RetryableRewriteField, boolean>>({
     coverText: false,
     title: false,
     body: false,
   });
+  const customTemplates = useCoverTemplateLibraryStore((state) => state.customTemplates);
+  const addCustomTemplate = useCoverTemplateLibraryStore((state) => state.addCustomTemplate);
+  const removeCustomTemplate = useCoverTemplateLibraryStore((state) => state.removeCustomTemplate);
 
   const note = originalNote;
   const displayTitle = sanitizeTitle(note.originalTitle || "");
   const originalTags = buildOriginalTags(result);
   const rewrittenTags = buildDisplayTags(result);
-  const resolvedCoverTemplate = resolveResultCoverTemplateState(result);
-  const currentTemplateFamily = resolvedCoverTemplate.family;
-  const currentTemplateVariant = resolvedCoverTemplate.variant;
-  const isUsingCustomBaseImage =
-    Boolean(result.coverBaseImage) && !isTemplateVariantSource(result.coverBaseImage);
-  const currentTemplateVariantIndex = Math.max(
-    currentTemplateFamily.variants.findIndex((variant) => variant.id === currentTemplateVariant.id),
-    0
+  const allTemplateAssets = useMemo(
+    () => getAllCoverTemplateAssets(customTemplates),
+    [customTemplates]
   );
+  const templateLibraryAssets = useMemo(() => {
+    const sourceRank = { upload: 0, ai: 1, builtin: 2 } as const;
+
+    return [...allTemplateAssets].sort((left, right) => {
+      const rankDelta = sourceRank[left.sourceType] - sourceRank[right.sourceType];
+      if (rankDelta !== 0) return rankDelta;
+
+      return (right.createdAt || "").localeCompare(left.createdAt || "");
+    });
+  }, [allTemplateAssets]);
+  const resolvedCoverTemplate = resolveResultCoverTemplateState(result, customTemplates);
+  const currentTemplateAsset =
+    findCoverTemplateAssetById(result.coverTemplateVariantId, customTemplates) ||
+    allTemplateAssets.find((asset) => asset.src === result.coverBaseImage) ||
+    null;
+  const activeTemplateAsset = currentTemplateAsset || resolvedCoverTemplate.asset;
+  const isUsingCustomBaseImage =
+    Boolean(result.coverBaseImage) && result.coverBaseImage !== activeTemplateAsset.src;
+  const selectedTemplateAssetId = currentTemplateAsset?.id || resolvedCoverTemplate.asset.id;
   const selectedPublishPersona = (result.publishPersona || "").trim();
   const isSaved = isRewriteResultSaved(result, note);
   const editedCategories = getEditedRewriteCategories(result, draftOverrides);
@@ -1995,7 +2104,7 @@ function RewriteRow({
     overrides: Partial<
       Pick<RewriteResult, "rewrittenCoverText" | "coverTemplateFamilyId" | "coverTemplateVariantId" | "coverBaseImage">
     > = {},
-    options: { trackAsManual?: boolean } = {}
+    options: { trackAsManual?: boolean; customTemplateAssets?: CoverTemplateAsset[] } = {}
   ) {
     setGeneratingCover(true);
     try {
@@ -2004,6 +2113,7 @@ function RewriteRow({
         result,
         coverText: nextCoverText,
         overrides,
+        customTemplates: options.customTemplateAssets ?? customTemplates,
       });
 
       const updates: Partial<RewriteResult> = {
@@ -2025,49 +2135,39 @@ function RewriteRow({
     }
   }
 
-  async function handleBaseImageUpload(file: File) {
-    if (!canEditGeneratedFields || generatingCover) return;
-    try {
-      const dataUrl = await readFileAsDataUrl(file);
-      await rebuildCover({ coverBaseImage: dataUrl });
-    } catch (error) {
-      console.error("读取底图失败:", error);
-    }
-  }
-
   async function handleFinishedImageUpload(file: File) {
     if (!canEditGeneratedFields) return;
     try {
       const dataUrl = await readFileAsDataUrl(file);
+      const { width, height } = await readImageSize(dataUrl);
+
+      if (!isThreeFourRatio(width, height)) {
+        setCropModalState({
+          mode: "finished-cover",
+          src: dataUrl,
+        });
+        return;
+      }
+
       applyManualUpdate({ rewrittenCover: dataUrl });
     } catch (error) {
       console.error("读取成品图片失败:", error);
+      window.alert(error instanceof Error ? error.message : "读取成品图片失败");
     }
   }
 
-  async function handleTemplateFamilyChange(familyId: string) {
+  async function handleTemplateAssetSelect(
+    asset: CoverTemplateAsset,
+    customTemplateAssets = customTemplates
+  ) {
     if (!canEditGeneratedFields || generatingCover) return;
-    const nextFamily = COVER_TEMPLATE_FAMILIES.find((family) => family.id === familyId);
-    if (!nextFamily) return;
     setShowTemplates(false);
     await rebuildCover({
-      coverTemplateFamilyId: nextFamily.id,
-      coverTemplateVariantId: nextFamily.variants[0].id,
-      coverBaseImage: nextFamily.variants[0].src,
-    });
-  }
-
-  async function handleSwapTemplateVariant() {
-    if (!canEditGeneratedFields || generatingCover) return;
-    const nextVariant = getNextCoverTemplateVariant(
-      currentTemplateFamily.id,
-      currentTemplateVariant.id
-    );
-
-    await rebuildCover({
-      coverTemplateFamilyId: currentTemplateFamily.id,
-      coverTemplateVariantId: nextVariant.id,
-      coverBaseImage: nextVariant.src,
+      coverTemplateFamilyId: asset.layoutId,
+      coverTemplateVariantId: asset.id,
+      coverBaseImage: asset.src,
+    }, {
+      customTemplateAssets,
     });
   }
 
@@ -2075,10 +2175,159 @@ function RewriteRow({
     if (!canEditGeneratedFields || generatingCover) return;
 
     await rebuildCover({
-      coverTemplateFamilyId: currentTemplateFamily.id,
-      coverTemplateVariantId: currentTemplateVariant.id,
-      coverBaseImage: currentTemplateVariant.src,
+      coverTemplateFamilyId: activeTemplateAsset.layoutId,
+      coverTemplateVariantId: activeTemplateAsset.id,
+      coverBaseImage: activeTemplateAsset.src,
     });
+  }
+
+  async function saveCustomTemplateAsset(args: {
+    src: string;
+    sourceType: "upload" | "ai";
+    createdAt?: string;
+    prompt?: string;
+    autoSelect?: boolean;
+  }) {
+    const createdAt = args.createdAt || getCurrentIsoTimestamp();
+    const asset = createCustomCoverTemplateAsset({
+      id: createCoverTemplateAssetId(args.sourceType),
+      label: buildCoverTemplateAssetLabel(args.sourceType, createdAt),
+      src: args.src,
+      sourceType: args.sourceType,
+      layoutId: DEFAULT_COVER_LAYOUT_ID,
+      createdAt,
+      prompt: args.prompt?.trim() || undefined,
+    });
+    const nextCustomTemplates = [
+      asset,
+      ...customTemplates.filter((item) => item.id !== asset.id),
+    ];
+
+    addCustomTemplate(asset);
+
+    if (args.autoSelect ?? false) {
+      await handleTemplateAssetSelect(asset, nextCustomTemplates);
+    }
+  }
+
+  async function handleTemplateLibraryUpload(file: File) {
+    if (!canEditGeneratedFields || generatingCover) return;
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const { width, height } = await readImageSize(dataUrl);
+      const createdAt = getCurrentIsoTimestamp();
+
+      if (isThreeFourRatio(width, height)) {
+        await saveCustomTemplateAsset({
+          src: dataUrl,
+          sourceType: "upload",
+          createdAt,
+          autoSelect: false,
+        });
+        return;
+      }
+
+      setCropModalState({
+        mode: "template-library",
+        src: dataUrl,
+        sourceType: "upload",
+        createdAt,
+      });
+    } catch (error) {
+      console.error("上传模板失败:", error);
+      window.alert(error instanceof Error ? error.message : "上传模板失败");
+    }
+  }
+
+  async function handleCropConfirm(croppedDataUrl: string) {
+    if (!cropModalState) return;
+
+    const pendingCrop = cropModalState;
+    setCropModalState(null);
+
+    if (pendingCrop.mode === "finished-cover") {
+      applyManualUpdate({ rewrittenCover: croppedDataUrl });
+      return;
+    }
+
+    await saveCustomTemplateAsset({
+      src: croppedDataUrl,
+      sourceType: pendingCrop.sourceType,
+      createdAt: pendingCrop.createdAt,
+      prompt: pendingCrop.prompt,
+      autoSelect: false,
+    });
+  }
+
+  async function handleAiTemplateGenerate() {
+    if (!canEditGeneratedFields || aiTemplateLoading) return;
+
+    const prompt = aiTemplatePrompt.trim();
+    if (!prompt) return;
+
+    setAiTemplateLoading(true);
+    try {
+      const response = await callJimengGenerate({
+        prompt,
+        ratio: "3:4",
+        resolution: "2k",
+        ...(aiTemplateMode === "image" && aiTemplateSourceImageSrc
+          ? { referenceImageSrc: aiTemplateSourceImageSrc }
+          : {}),
+      });
+
+      if (!response.imageUrl) {
+        throw new Error("AI生成模板失败");
+      }
+
+      await saveCustomTemplateAsset({
+        src: response.imageUrl,
+        sourceType: "ai",
+        createdAt: getCurrentIsoTimestamp(),
+        prompt,
+        autoSelect: false,
+      });
+      setAiTemplateOpen(false);
+      setAiTemplateMode("text");
+      setAiTemplatePrompt("");
+      setAiTemplateSourceImageSrc("");
+    } catch (error) {
+      console.error("AI生成模板失败:", error);
+      window.alert(error instanceof Error ? error.message : "AI生成模板失败");
+    } finally {
+      setAiTemplateLoading(false);
+    }
+  }
+
+  async function handleAiTemplateSourceUpload(file: File) {
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      setAiTemplateSourceImageSrc(dataUrl);
+    } catch (error) {
+      console.error("读取图生图垫图失败:", error);
+      window.alert(error instanceof Error ? error.message : "读取图生图垫图失败");
+    }
+  }
+
+  function handleRemoveTemplateAsset(asset: CoverTemplateAsset) {
+    if (asset.sourceType === "builtin") return;
+
+    const confirmed = window.confirm(`确认删除模板「${asset.label}」吗？`);
+    if (!confirmed) return;
+    removeCustomTemplate(asset.id);
+  }
+
+  function getDefaultAiTemplateSourceImage() {
+    if (result.rewrittenCover) return result.rewrittenCover;
+    if (result.coverBaseImage) return result.coverBaseImage;
+    if (activeTemplateAsset.src) return activeTemplateAsset.src;
+    return "";
+  }
+
+  function handleOpenAiTemplateModal() {
+    setAiTemplateSourceImageSrc(getDefaultAiTemplateSourceImage());
+    setAiTemplateOpen(true);
   }
 
   return (
@@ -2287,7 +2536,7 @@ function RewriteRow({
                               unoptimized
                             />
                             <HoverImageActions
-                              onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "二创封面预览" })}
+                              onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "预览" })}
                             />
                             {showInlineCoverLoading && (
                               <div className="absolute inset-0 flex items-center justify-center bg-white/65 text-[11px] text-gray-500">
@@ -2315,29 +2564,6 @@ function RewriteRow({
                             )}
                           >
                             <Upload className="w-3 h-3" />
-                            换背景
-                            <input
-                              type="file"
-                              accept="image/*"
-                              className="hidden"
-                              disabled={!canEditGeneratedFields}
-                              onChange={async (e) => {
-                                const file = e.target.files?.[0];
-                                e.currentTarget.value = "";
-                                if (!file) return;
-                                await handleBaseImageUpload(file);
-                              }}
-                            />
-                          </label>
-                          <label
-                            className={clsx(
-                              "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
-                              canEditGeneratedFields
-                                ? "cursor-pointer text-gray-500 hover:text-gray-700"
-                                : "cursor-not-allowed text-gray-300"
-                            )}
-                          >
-                            <Upload className="w-3 h-3" />
                             直接替换封面
                             <input
                               type="file"
@@ -2352,20 +2578,6 @@ function RewriteRow({
                               }}
                             />
                           </label>
-                          <button
-                            onClick={() => setShowTemplates((current) => !current)}
-                            disabled={generatingCover || !canEditGeneratedFields}
-                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
-                          >
-                            选模板
-                          </button>
-                          <button
-                            onClick={() => void handleSwapTemplateVariant()}
-                            disabled={generatingCover || !canEditGeneratedFields}
-                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
-                          >
-                            同款切换
-                          </button>
                           {isUsingCustomBaseImage && (
                             <button
                               onClick={() => void handleResetTemplateBaseImage()}
@@ -2376,70 +2588,123 @@ function RewriteRow({
                             </button>
                           )}
                         </div>
-                        <div className="rounded-lg bg-gray-50 px-2 py-1.5 text-[11px] text-gray-500">
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <span>当前模板：{currentTemplateFamily.label}</span>
-                            <span>
-                              搭配 {currentTemplateVariantIndex + 1}/{currentTemplateFamily.variants.length}
-                            </span>
-                            <span>{currentTemplateVariant.label}</span>
-                            {isUsingCustomBaseImage && (
-                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-red-500 ring-1 ring-red-100">
-                                已启用自定义底图
-                              </span>
-                            )}
-                          </div>
-                        </div>
+                        <button
+                          onClick={() => setShowTemplates((current) => !current)}
+                          disabled={generatingCover || !canEditGeneratedFields}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-500 transition-colors hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                        >
+                          {showTemplates ? "收起模板库" : "展开模板库"}
+                        </button>
                       </div>
                     </div>
 
                     {showTemplates && canEditGeneratedFields && (
-                      <div className="mt-2 p-2 bg-gray-50 rounded-lg">
-                        <p className="mb-1.5 text-xs text-gray-500">选择模板族</p>
-                        <div className="grid max-w-[540px] grid-cols-3 gap-2">
-                          {COVER_TEMPLATE_FAMILIES.map((family) => {
-                            const previewVariant =
-                              family.id === currentTemplateFamily.id
-                                ? currentTemplateVariant
-                                : family.variants[0];
-
-                            return (
+                      <div className="relative mt-2 h-[560px] min-h-[360px] max-h-[780px] resize-y overflow-x-hidden overflow-y-auto rounded-lg bg-gray-50 p-2.5">
+                        <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-gray-200 bg-white/90 px-3 py-2.5">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-gray-700">模板库</p>
+                            <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                              上传图若不是 3:4 会先裁剪；AI生成模板直接使用你输入的提示词。
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 hover:border-gray-300">
+                              <Upload className="h-3 w-3" />
+                              上传模板
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={async (event) => {
+                                  const file = event.target.files?.[0];
+                                  event.currentTarget.value = "";
+                                  if (!file) return;
+                                  await handleTemplateLibraryUpload(file);
+                                }}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={handleOpenAiTemplateModal}
+                              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 hover:border-gray-300"
+                            >
+                              AI生成模板
+                            </button>
+                          </div>
+                        </div>
+                        <p className="mt-2 text-[11px] text-gray-400">
+                          点击任意底图后，程序会继续用当前封面文案本地排字。内置模板沿用预设排版，上传和 AI生成模板默认走通用排版。
+                        </p>
+                        <div className="mt-2 grid max-w-[560px] grid-cols-3 gap-2 sm:grid-cols-4">
+                          {templateLibraryAssets.map((asset) => (
+                            <div key={asset.id} className="relative">
                               <button
-                                key={family.id}
-                                onClick={() => void handleTemplateFamilyChange(family.id)}
+                                type="button"
+                                onClick={() => void handleTemplateAssetSelect(asset)}
                                 className={clsx(
-                                  "rounded-xl border p-1.5 text-left transition-colors",
-                                  family.id === currentTemplateFamily.id
+                                  "w-full rounded-xl border p-1.5 text-left transition-colors",
+                                  asset.id === selectedTemplateAssetId
                                     ? "border-red-200 bg-red-50/50"
                                     : "border-gray-200 bg-white hover:border-gray-300"
                                 )}
+                                title={asset.prompt || asset.label}
                               >
                                 <div className="group relative aspect-[3/4] overflow-hidden rounded-lg bg-gray-100">
                                   <Image
-                                    src={previewVariant.src}
-                                    alt={family.label}
+                                    src={asset.src}
+                                    alt={asset.label}
                                     fill
-                                    sizes="96px"
+                                    sizes="88px"
                                     className="object-cover"
+                                    unoptimized
                                   />
                                   <HoverImageActions
                                     small
                                     previewLabel="预览"
                                     onPreview={() =>
                                       setPreviewImage({
-                                        src: previewVariant.src,
-                                        title: `${family.label} · ${previewVariant.label}`,
+                                        src: asset.src,
+                                        title: asset.label,
                                       })
                                     }
                                   />
                                 </div>
-                                <p className="mt-1.5 text-xs font-medium text-gray-700">{family.label}</p>
-                                <p className="mt-0.5 text-[11px] leading-relaxed text-gray-400">
-                                  {family.description}
+                                <p className="mt-1.5 truncate text-[11px] font-medium text-gray-700">
+                                  {asset.label}
                                 </p>
+                                <div className="mt-1 flex items-center gap-1">
+                                  <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
+                                    {getCoverTemplateSourceLabel(asset.sourceType)}
+                                  </span>
+                                  {asset.id === selectedTemplateAssetId && (
+                                    <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] text-red-500">
+                                      当前
+                                    </span>
+                                  )}
+                                </div>
                               </button>
-                            );
-                          })}
+                              {asset.sourceType !== "builtin" && (
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    handleRemoveTemplateAsset(asset);
+                                  }}
+                                  className="absolute right-2 top-2 rounded-full bg-white/90 p-1 text-gray-400 shadow-sm transition-colors hover:text-red-500"
+                                  title="删除模板"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        <div
+                          aria-hidden="true"
+                          className="pointer-events-none absolute bottom-2 right-2 select-none text-[10px] leading-none text-gray-300"
+                        >
+                          ╱╱
                         </div>
                       </div>
                     )}
@@ -2559,6 +2824,42 @@ function RewriteRow({
           src={previewImage.src}
           title={previewImage.title}
           onClose={() => setPreviewImage(null)}
+        />
+      )}
+
+      {cropModalState && (
+        <ImageCropModal
+          imageSrc={cropModalState.src}
+          title={cropModalState.mode === "finished-cover" ? "裁剪封面为 3:4" : "裁剪模板为 3:4"}
+          onCancel={() => setCropModalState(null)}
+          onConfirm={(croppedDataUrl) => {
+            void handleCropConfirm(croppedDataUrl);
+          }}
+        />
+      )}
+
+      {aiTemplateOpen && (
+        <AiTemplateModal
+          mode={aiTemplateMode}
+          prompt={aiTemplatePrompt}
+          sourceImageSrc={aiTemplateSourceImageSrc}
+          loading={aiTemplateLoading}
+          onModeChange={(mode) => {
+            setAiTemplateMode(mode);
+            if (mode === "image" && !aiTemplateSourceImageSrc) {
+              setAiTemplateSourceImageSrc(getDefaultAiTemplateSourceImage());
+            }
+          }}
+          onPromptChange={setAiTemplatePrompt}
+          onSourceImageUpload={(file) => handleAiTemplateSourceUpload(file)}
+          onClose={() => {
+            if (aiTemplateLoading) return;
+            setAiTemplateOpen(false);
+            setAiTemplateSourceImageSrc("");
+          }}
+          onSubmit={() => {
+            void handleAiTemplateGenerate();
+          }}
         />
       )}
     </>

@@ -9,18 +9,22 @@ export type CoverTemplateLayout = {
   color: string;
 };
 
-export type CoverTemplateVariant = {
+export type CoverTemplateLayoutProfile = {
+  id: string;
+  label: string;
+  layout: CoverTemplateLayout;
+};
+
+export type CoverTemplateSourceType = "builtin" | "upload" | "ai";
+
+export type CoverTemplateAsset = {
   id: string;
   label: string;
   src: string;
-};
-
-export type CoverTemplateFamily = {
-  id: string;
-  label: string;
-  description: string;
-  layout: CoverTemplateLayout;
-  variants: CoverTemplateVariant[];
+  layoutId: string;
+  sourceType: CoverTemplateSourceType;
+  createdAt?: string;
+  prompt?: string;
 };
 
 const DEFAULT_FONT_FAMILY = [
@@ -33,49 +37,40 @@ const DEFAULT_FONT_FAMILY = [
   "sans-serif",
 ].join(", ");
 
-export const COVER_TEMPLATE_FAMILIES: readonly CoverTemplateFamily[] = [
+export const DEFAULT_COVER_LAYOUT_ID = "standard";
+
+export const COVER_TEMPLATE_LAYOUT_PROFILES: readonly CoverTemplateLayoutProfile[] = [
   {
-    id: "basic",
-    label: "基础",
-    description: "干净留白，信息感更强",
+    id: "standard",
+    label: "通用排版",
     layout: {
       align: "left",
-      box: { x: 0.11, y: 0.18, width: 0.76, height: 0.42 },
-      maxFontRatio: 0.088,
-      minFontRatio: 0.05,
+      box: { x: 0.11, y: 0.16, width: 0.76, height: 0.42 },
+      maxFontRatio: 0.086,
+      minFontRatio: 0.048,
       lineHeightMultiplier: 1.18,
       fontWeight: 700,
       fontFamily: DEFAULT_FONT_FAMILY,
-      color: "#4e4a55",
+      color: "#4f4b55",
     },
-    variants: [
-      { id: "template1", label: "基础 01", src: "/templates/template1.png" },
-      { id: "template2", label: "基础 02", src: "/templates/template2.png" },
-    ],
   },
   {
-    id: "fresh",
-    label: "清新",
-    description: "柔和浅色，偏内容卡片",
+    id: "airy",
+    label: "轻盈排版",
     layout: {
       align: "left",
-      box: { x: 0.12, y: 0.16, width: 0.74, height: 0.38 },
-      maxFontRatio: 0.085,
-      minFontRatio: 0.048,
+      box: { x: 0.12, y: 0.15, width: 0.74, height: 0.38 },
+      maxFontRatio: 0.084,
+      minFontRatio: 0.046,
       lineHeightMultiplier: 1.18,
       fontWeight: 700,
       fontFamily: DEFAULT_FONT_FAMILY,
       color: "#514854",
     },
-    variants: [
-      { id: "template7", label: "清新 01", src: "/templates/template7.png" },
-      { id: "template3", label: "清新 02", src: "/templates/template3.png" },
-    ],
   },
   {
     id: "doodle",
-    label: "涂鸦",
-    description: "笔触感更强，适合口语短句",
+    label: "涂鸦排版",
     layout: {
       align: "left",
       box: { x: 0.11, y: 0.17, width: 0.76, height: 0.44 },
@@ -86,10 +81,51 @@ export const COVER_TEMPLATE_FAMILIES: readonly CoverTemplateFamily[] = [
       fontFamily: DEFAULT_FONT_FAMILY,
       color: "#612736",
     },
-    variants: [
-      { id: "template4", label: "涂鸦 01", src: "/templates/template4.png" },
-      { id: "template6", label: "涂鸦 02", src: "/templates/template6.png" },
-    ],
+  },
+] as const;
+
+export const BUILTIN_COVER_TEMPLATE_ASSETS: readonly CoverTemplateAsset[] = [
+  {
+    id: "builtin-template1",
+    label: "基础 01",
+    src: "/templates/template1.png",
+    layoutId: "standard",
+    sourceType: "builtin",
+  },
+  {
+    id: "builtin-template2",
+    label: "基础 02",
+    src: "/templates/template2.png",
+    layoutId: "standard",
+    sourceType: "builtin",
+  },
+  {
+    id: "builtin-template7",
+    label: "清新 01",
+    src: "/templates/template7.png",
+    layoutId: "airy",
+    sourceType: "builtin",
+  },
+  {
+    id: "builtin-template3",
+    label: "清新 02",
+    src: "/templates/template3.png",
+    layoutId: "airy",
+    sourceType: "builtin",
+  },
+  {
+    id: "builtin-template4",
+    label: "涂鸦 01",
+    src: "/templates/template4.png",
+    layoutId: "doodle",
+    sourceType: "builtin",
+  },
+  {
+    id: "builtin-template6",
+    label: "涂鸦 02",
+    src: "/templates/template6.png",
+    layoutId: "doodle",
+    sourceType: "builtin",
   },
 ] as const;
 
@@ -99,69 +135,89 @@ function hashSeed(seed: string) {
   }, 7);
 }
 
-export function getCoverTemplateFamily(familyId?: string | null) {
+export function getCoverLayoutProfile(layoutId?: string | null) {
   return (
-    COVER_TEMPLATE_FAMILIES.find((family) => family.id === familyId) ||
-    COVER_TEMPLATE_FAMILIES[0]
+    COVER_TEMPLATE_LAYOUT_PROFILES.find((profile) => profile.id === layoutId) ||
+    COVER_TEMPLATE_LAYOUT_PROFILES[0]
   );
 }
 
-export function getCoverTemplateVariant(
-  familyId?: string | null,
-  variantId?: string | null
-) {
-  const family = getCoverTemplateFamily(familyId);
+export function getBuiltinCoverTemplateAsset(templateId?: string | null) {
+  return BUILTIN_COVER_TEMPLATE_ASSETS.find((asset) => asset.id === templateId) || null;
+}
 
-  return (
-    family.variants.find((variant) => variant.id === variantId) || family.variants[0]
-  );
+export function getAllCoverTemplateAssets(customAssets: CoverTemplateAsset[] = []) {
+  return [...BUILTIN_COVER_TEMPLATE_ASSETS, ...customAssets];
+}
+
+export function findCoverTemplateAssetById(
+  templateId?: string | null,
+  customAssets: CoverTemplateAsset[] = []
+) {
+  if (!templateId) return null;
+  return getAllCoverTemplateAssets(customAssets).find((asset) => asset.id === templateId) || null;
 }
 
 export function pickDefaultCoverTemplateSelection(seed = "default") {
-  const familyIndex = hashSeed(seed) % COVER_TEMPLATE_FAMILIES.length;
-  const family = COVER_TEMPLATE_FAMILIES[familyIndex];
-  const variantIndex = hashSeed(`${seed}-${family.id}`) % family.variants.length;
-  const variant = family.variants[variantIndex];
+  const assetIndex = hashSeed(seed) % BUILTIN_COVER_TEMPLATE_ASSETS.length;
+  const asset = BUILTIN_COVER_TEMPLATE_ASSETS[assetIndex];
 
   return {
-    familyId: family.id,
-    variantId: variant.id,
-    baseImage: variant.src,
+    layoutId: asset.layoutId,
+    templateId: asset.id,
+    baseImage: asset.src,
   };
 }
 
 export function resolveCoverTemplateSelection(args: {
-  familyId?: string | null;
-  variantId?: string | null;
+  layoutId?: string | null;
+  templateId?: string | null;
   baseImage?: string | null;
   seed?: string;
+  customAssets?: CoverTemplateAsset[];
 }) {
   const fallback = pickDefaultCoverTemplateSelection(args.seed);
-  const family = getCoverTemplateFamily(args.familyId || fallback.familyId);
-  const variant = getCoverTemplateVariant(family.id, args.variantId || fallback.variantId);
+  const asset =
+    findCoverTemplateAssetById(args.templateId, args.customAssets) ||
+    findCoverTemplateAssetById(fallback.templateId, args.customAssets) ||
+    BUILTIN_COVER_TEMPLATE_ASSETS[0];
+  const layout = getCoverLayoutProfile(args.layoutId || asset.layoutId || fallback.layoutId);
 
   return {
-    family,
-    variant,
-    baseImage: (args.baseImage || "").trim() || variant.src,
+    asset,
+    layout,
+    baseImage: (args.baseImage || "").trim() || asset.src,
   };
 }
 
-export function getNextCoverTemplateVariant(
-  familyId?: string | null,
-  currentVariantId?: string | null
-) {
-  const family = getCoverTemplateFamily(familyId);
-  const currentIndex = family.variants.findIndex((variant) => variant.id === currentVariantId);
-  const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % family.variants.length : 0;
-  return family.variants[nextIndex];
+export function isBuiltinTemplateAssetId(templateId?: string | null) {
+  if (!templateId) return false;
+  return BUILTIN_COVER_TEMPLATE_ASSETS.some((asset) => asset.id === templateId);
 }
 
-export function isTemplateVariantSource(source?: string | null) {
+export function isBuiltinTemplateSource(source?: string | null) {
   const normalized = (source || "").trim();
   if (!normalized) return false;
 
-  return COVER_TEMPLATE_FAMILIES.some((family) =>
-    family.variants.some((variant) => variant.src === normalized)
-  );
+  return BUILTIN_COVER_TEMPLATE_ASSETS.some((asset) => asset.src === normalized);
+}
+
+export function createCustomCoverTemplateAsset(params: {
+  id: string;
+  label: string;
+  src: string;
+  sourceType: Exclude<CoverTemplateSourceType, "builtin">;
+  layoutId?: string;
+  createdAt?: string;
+  prompt?: string;
+}) {
+  return {
+    id: params.id,
+    label: params.label,
+    src: params.src,
+    sourceType: params.sourceType,
+    layoutId: params.layoutId || DEFAULT_COVER_LAYOUT_ID,
+    createdAt: params.createdAt,
+    prompt: params.prompt,
+  } satisfies CoverTemplateAsset;
 }
