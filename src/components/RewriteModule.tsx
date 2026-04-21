@@ -2611,8 +2611,8 @@ function RewriteRow({
                     二创封面
                   </p>
                   <div className="space-y-1">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="flex items-start gap-2">
+                    <div className="flex items-start gap-2">
+                      <div className="space-y-2">
                         <div className="relative aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden w-24 flex-shrink-0 group">
                           {result.rewrittenCover ? (
                             <>
@@ -2642,57 +2642,57 @@ function RewriteRow({
                             </div>
                           )}
                         </div>
-                        <div className="min-w-0 flex-1 space-y-2">
-                          <div className="flex flex-wrap gap-1">
-                            <label
-                              className={clsx(
-                                "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
-                                canEditGeneratedFields
-                                  ? "cursor-pointer text-gray-500 hover:text-gray-700"
-                                  : "cursor-not-allowed text-gray-300"
-                              )}
-                            >
-                              <Upload className="w-3 h-3" />
-                              直接替换封面
-                              <input
-                                type="file"
-                                accept="image/*"
-                                className="hidden"
-                                disabled={!canEditGeneratedFields}
-                                onChange={async (e) => {
-                                  const file = e.target.files?.[0];
-                                  e.currentTarget.value = "";
-                                  if (!file) return;
-                                  await handleFinishedImageUpload(file);
-                                }}
-                              />
-                            </label>
-                            {isUsingCustomBaseImage && (
-                              <button
-                                onClick={() => void handleResetTemplateBaseImage()}
-                                disabled={generatingCover || !canEditGeneratedFields}
-                                className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
-                              >
-                                恢复模板
-                              </button>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => setShowTemplates((current) => !current)}
-                            disabled={generatingCover || !canEditGeneratedFields}
-                            className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-500 transition-colors hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300"
-                          >
-                            {showTemplates ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                            {showTemplates ? "收起模板库" : "展开模板库"}
-                          </button>
-                        </div>
                       </div>
-                      <PublishPersonaChecklist
-                        options={PUBLISH_PERSONA_OPTIONS}
-                        value={selectedPublishPersona}
-                        onSelect={handlePublishPersonaSelect}
-                        disabled={isProcessing}
-                      />
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <div className="flex flex-wrap gap-1">
+                          <label
+                            className={clsx(
+                              "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
+                              canEditGeneratedFields
+                                ? "cursor-pointer text-gray-500 hover:text-gray-700"
+                                : "cursor-not-allowed text-gray-300"
+                            )}
+                          >
+                            <Upload className="w-3 h-3" />
+                            直接替换封面
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              disabled={!canEditGeneratedFields}
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.currentTarget.value = "";
+                                if (!file) return;
+                                await handleFinishedImageUpload(file);
+                              }}
+                            />
+                          </label>
+                          {isUsingCustomBaseImage && (
+                            <button
+                              onClick={() => void handleResetTemplateBaseImage()}
+                              disabled={generatingCover || !canEditGeneratedFields}
+                              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
+                            >
+                              恢复模板
+                            </button>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => setShowTemplates((current) => !current)}
+                          disabled={generatingCover || !canEditGeneratedFields}
+                          className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-500 transition-colors hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                        >
+                          {showTemplates ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                          {showTemplates ? "收起模板库" : "展开模板库"}
+                        </button>
+                        <PublishPersonaChecklist
+                          options={PUBLISH_PERSONA_OPTIONS}
+                          value={selectedPublishPersona}
+                          onSelect={handlePublishPersonaSelect}
+                          disabled={isProcessing}
+                        />
+                      </div>
                     </div>
 
                     {showTemplates && canEditGeneratedFields && (
@@ -2829,6 +2829,7 @@ function RewriteRow({
                       setEditingCoverText(false);
                     }}
                     multiline
+                    multilineRows={4}
                     syncedHeight={syncedCoverTextHeight}
                     onMultilineHeightChange={(height) => handleSyncedFieldHeightChange("coverText", height)}
                   />
@@ -3051,7 +3052,7 @@ function PublishPersonaChecklist({
   disabled?: boolean;
 }) {
   return (
-    <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+    <div className="flex flex-wrap items-center gap-2 pt-0.5">
       {options.map((option) => {
         const selected = option === value;
 
@@ -3241,6 +3242,7 @@ function EditableField({
   multiline,
   syncedHeight,
   onMultilineHeightChange,
+  multilineRows = 6,
 }: {
   label: string;
   value: string;
@@ -3257,6 +3259,7 @@ function EditableField({
   multiline: boolean;
   syncedHeight?: number;
   onMultilineHeightChange?: (height: number) => void;
+  multilineRows?: number;
 }) {
   const [draft, setDraft] = useState(value);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -3337,7 +3340,7 @@ function EditableField({
               }}
               className="min-h-[120px] w-full resize-y rounded border border-gray-300 p-2 text-xs focus:border-red-400 focus:outline-none"
               style={syncedHeight ? { height: syncedHeight } : undefined}
-              rows={6}
+              rows={multilineRows}
               autoFocus
             />
           ) : (
