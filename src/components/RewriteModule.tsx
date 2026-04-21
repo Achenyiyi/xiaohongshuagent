@@ -234,6 +234,62 @@ function buildOriginalTags(result: RewriteResult): string[] {
   return dedupeTags(result.originalNote.originalTags || []);
 }
 
+function getCurrentIsoTimestamp() {
+  return new Date().toISOString();
+}
+
+function parseLooseTimestamp(value?: string | null) {
+  if (!value) return null;
+
+  const normalized = value.trim().replace(/\//g, "-");
+  if (!normalized) return null;
+
+  const withTimeSeparator = normalized.includes("T")
+    ? normalized
+    : normalized.replace(" ", "T");
+  const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(withTimeSeparator)
+    ? `${withTimeSeparator}:00`
+    : withTimeSeparator;
+  const parsed = new Date(withSeconds);
+
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatTwoDigits(value: number) {
+  return value.toString().padStart(2, "0");
+}
+
+function pickMostRecentTimestamp(...values: Array<string | null | undefined>) {
+  let latestRaw = "";
+  let latestTime = 0;
+
+  values.forEach((value) => {
+    const parsed = parseLooseTimestamp(value);
+    if (!parsed) return;
+
+    const timestamp = parsed.getTime();
+    if (timestamp >= latestTime) {
+      latestTime = timestamp;
+      latestRaw = value || "";
+    }
+  });
+
+  return latestRaw;
+}
+
+function formatRewriteModifiedTime(value?: string | null) {
+  const parsed = parseLooseTimestamp(value);
+  if (!parsed) return "";
+
+  const now = new Date();
+  const sameYear = now.getFullYear() === parsed.getFullYear();
+  const dateLabel = sameYear
+    ? `${formatTwoDigits(parsed.getMonth() + 1)}-${formatTwoDigits(parsed.getDate())}`
+    : `${parsed.getFullYear()}-${formatTwoDigits(parsed.getMonth() + 1)}-${formatTwoDigits(parsed.getDate())}`;
+
+  return `最近修改 ${dateLabel} ${formatTwoDigits(parsed.getHours())}:${formatTwoDigits(parsed.getMinutes())}`;
+}
+
 function parseTagDraft(input: string): string[] {
   const extracted = extractTagsFromText(input);
   if (extracted.length > 0) return extracted;
@@ -447,6 +503,95 @@ const EDITED_CATEGORY_ORDER: Array<keyof RewriteEditBaseline> = [
   "rewrittenCoverText",
 ];
 
+function isTrackedEditValueEqual(
+  left: RewriteEditBaseline[keyof RewriteEditBaseline],
+  right: RewriteEditBaseline[keyof RewriteEditBaseline]
+) {
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  return left === right;
+}
+
+function getTrackedResultValue<K extends keyof RewriteEditBaseline>(
+  result: RewriteResult,
+  field: K
+): RewriteEditBaseline[K] {
+  if (field === "rewrittenTags") {
+    return buildDisplayTags(result) as RewriteEditBaseline[K];
+  }
+
+  return result[field] as RewriteEditBaseline[K];
+}
+
+function buildNextFieldModifiedAt(
+  result: RewriteResult,
+  updates: Partial<RewriteResult>,
+  timestamp: string,
+  currentFieldModifiedAt = getEffectiveFieldModifiedAt(result)
+) {
+  const nextFieldModifiedAt = { ...(currentFieldModifiedAt || {}) };
+  let touched = false;
+
+  EDITED_CATEGORY_ORDER.forEach((field) => {
+    if (!(field in updates)) return;
+
+    const nextValue = updates[field];
+    if (typeof nextValue === "undefined") return;
+
+    touched = true;
+
+    const currentValue = getTrackedResultValue(result, field);
+    if (isTrackedEditValueEqual(nextValue, currentValue)) {
+      return;
+    }
+
+    const baselineValue = result.editBaseline?.[field] ?? currentValue;
+    if (isTrackedEditValueEqual(nextValue, baselineValue)) {
+      delete nextFieldModifiedAt[field];
+      return;
+    }
+
+    nextFieldModifiedAt[field] = timestamp;
+  });
+
+  if (!touched) return result.fieldModifiedAt;
+  return Object.keys(nextFieldModifiedAt).length > 0 ? nextFieldModifiedAt : undefined;
+}
+
+function omitFieldModifiedAt(
+  result: RewriteResult,
+  fields: Array<keyof RewriteEditBaseline>,
+  currentFieldModifiedAt = getEffectiveFieldModifiedAt(result)
+) {
+  if (!currentFieldModifiedAt) return undefined;
+
+  const nextFieldModifiedAt = { ...currentFieldModifiedAt };
+  fields.forEach((field) => {
+    delete nextFieldModifiedAt[field];
+  });
+
+  return Object.keys(nextFieldModifiedAt).length > 0 ? nextFieldModifiedAt : undefined;
+}
+
+function getEffectiveFieldModifiedAt(result: RewriteResult) {
+  if (result.fieldModifiedAt) return result.fieldModifiedAt;
+  if (!result.lastModifiedAt || !result.editBaseline) return undefined;
+
+  const effectiveFieldModifiedAt: Partial<Record<keyof RewriteEditBaseline, string>> = {};
+  EDITED_CATEGORY_ORDER.forEach((field) => {
+    const currentValue = getTrackedResultValue(result, field);
+    const baselineValue = result.editBaseline?.[field] ?? currentValue;
+
+    if (!isTrackedEditValueEqual(currentValue, baselineValue)) {
+      effectiveFieldModifiedAt[field] = result.lastModifiedAt!;
+    }
+  });
+
+  return Object.keys(effectiveFieldModifiedAt).length > 0 ? effectiveFieldModifiedAt : undefined;
+}
+
 function getEditedRewriteCategories(
   result: RewriteResult,
   overrides: Partial<RewriteEditBaseline> = {}
@@ -460,11 +605,7 @@ function getEditedRewriteCategories(
     const currentValue = current[key];
     const baselineValue = baseline[key];
 
-    if (Array.isArray(currentValue) && Array.isArray(baselineValue)) {
-      return JSON.stringify(currentValue) !== JSON.stringify(baselineValue);
-    }
-
-    return currentValue !== baselineValue;
+    return !isTrackedEditValueEqual(currentValue, baselineValue);
   }).map((key) => EDITED_CATEGORY_LABELS[key]);
 }
 
@@ -557,6 +698,8 @@ export default function RewriteModule() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [bulkExpanded, setBulkExpanded] = useState(true);
+  const [bulkExpandVersion, setBulkExpandVersion] = useState(0);
   const [pendingExtractedEntries, setPendingExtractedEntries] = useState<PendingExtractedEntriesByScope>(
     createEmptyPendingExtractedEntries
   );
@@ -702,6 +845,8 @@ export default function RewriteModule() {
             editBaseline: mergeTrackedEditBaseline(current, {
               rewrittenTitle: titleRes.result || "",
             }),
+            fieldModifiedAt: omitFieldModifiedAt(current, ["rewrittenTitle"]),
+            lastModifiedAt: getCurrentIsoTimestamp(),
             errorMsg: undefined,
           });
           return;
@@ -723,6 +868,8 @@ export default function RewriteModule() {
             editBaseline: mergeTrackedEditBaseline(current, {
               rewrittenBody: normalizeRewrittenBody(bodyRes.result || "", note.originalBody || ""),
             }),
+            fieldModifiedAt: omitFieldModifiedAt(current, ["rewrittenBody"]),
+            lastModifiedAt: getCurrentIsoTimestamp(),
             errorMsg: undefined,
           });
           return;
@@ -752,6 +899,8 @@ export default function RewriteModule() {
           editBaseline: mergeTrackedEditBaseline(current, {
             rewrittenCoverText: coverTextRes.result || "",
           }),
+          fieldModifiedAt: omitFieldModifiedAt(current, ["rewrittenCoverText"]),
+          lastModifiedAt: getCurrentIsoTimestamp(),
           errorMsg: undefined,
         });
       } catch (e: unknown) {
@@ -788,7 +937,14 @@ export default function RewriteModule() {
       const controller = new AbortController();
       rewriteAbortControllersRef.current.set(resultId, controller);
 
-      updateRewriteResult(resultId, { status: "processing", errorMsg: undefined });
+      updateRewriteResult(resultId, {
+        status: "processing",
+        errorMsg: undefined,
+        rewrittenTitle: "",
+        rewrittenBody: "",
+        rewrittenCoverText: "",
+        rewrittenCover: "",
+      });
 
       try {
         const note = result.originalNote;
@@ -796,37 +952,70 @@ export default function RewriteModule() {
         const bodyReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("body") : "";
         const coverReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("cover") : "";
 
-        const originalCoverTextPromise = ensureOriginalCoverText(note, controller.signal);
+        const isCurrentRunActive = () =>
+          !controller.signal.aborted &&
+          rewriteAbortControllersRef.current.get(resultId) === controller;
+
+        const originalCoverTextPromise = ensureOriginalCoverText(note, controller.signal).then(
+          (originalCoverText) => {
+            if (isCurrentRunActive() && originalCoverText && originalCoverText !== note.coverText) {
+              updateRewriteResult(resultId, {
+                originalNote: {
+                  ...note,
+                  coverText: originalCoverText,
+                },
+              });
+            }
+            return originalCoverText;
+          }
+        );
         const titlePromptPayload = buildRewritePromptPayload("title", titleReplaceInfo);
         const bodyPromptPayload = buildRewritePromptPayload("body", bodyReplaceInfo);
 
-        const [titleRes, bodyRes, originalCoverText] = await Promise.all([
-          callRewriteApi({
-            type: "title",
-            content: sanitizeTitle(note.originalTitle || "") || note.originalBody || "",
-            replaceInfo: titleReplaceInfo,
-            signal: controller.signal,
-            ...titlePromptPayload,
-          }),
-          callRewriteApi({
-            type: "body",
-            content: note.originalBody || "",
-            replaceInfo: bodyReplaceInfo,
-            signal: controller.signal,
-            ...bodyPromptPayload,
-          }),
+        const titlePromise = callRewriteApi({
+          type: "title",
+          content: sanitizeTitle(note.originalTitle || "") || note.originalBody || "",
+          replaceInfo: titleReplaceInfo,
+          signal: controller.signal,
+          ...titlePromptPayload,
+        }).then((titleRes) => {
+          const rewrittenTitle = titleRes.result || "";
+          if (isCurrentRunActive()) {
+            updateRewriteResult(resultId, {
+              rewrittenTitle,
+              titleReplaceInfo,
+            });
+          }
+          return rewrittenTitle;
+        });
+
+        const bodyPromise = callRewriteApi({
+          type: "body",
+          content: note.originalBody || "",
+          replaceInfo: bodyReplaceInfo,
+          signal: controller.signal,
+          ...bodyPromptPayload,
+        }).then((bodyRes) => {
+          const rewrittenBody = normalizeRewrittenBody(bodyRes.result || "", note.originalBody || "");
+          if (isCurrentRunActive()) {
+            updateRewriteResult(resultId, {
+              rewrittenBody,
+              bodyReplaceInfo,
+            });
+          }
+          return rewrittenBody;
+        });
+
+        const [rewrittenTitle, rewrittenBody, originalCoverText] = await Promise.all([
+          titlePromise,
+          bodyPromise,
           originalCoverTextPromise,
         ]);
 
-        if (
-          controller.signal.aborted ||
-          rewriteAbortControllersRef.current.get(resultId) !== controller
-        ) {
+        if (!isCurrentRunActive()) {
           return;
         }
 
-        const rewrittenTitle = titleRes.result || "";
-        const rewrittenBody = normalizeRewrittenBody(bodyRes.result || "", note.originalBody || "");
         const coverPromptPayload = buildRewritePromptPayload("coverText", coverReplaceInfo);
         const rewrittenCoverTextRes = await callRewriteApi({
           type: "cover-text",
@@ -840,13 +1029,19 @@ export default function RewriteModule() {
           ...coverPromptPayload,
         });
 
-        if (
-          controller.signal.aborted ||
-          rewriteAbortControllersRef.current.get(resultId) !== controller
-        ) {
+        if (!isCurrentRunActive()) {
           return;
         }
+
         const rewrittenCoverText = rewrittenCoverTextRes.result || "";
+        updateRewriteResult(resultId, {
+          originalNote: {
+            ...note,
+            coverText: originalCoverText,
+          },
+          rewrittenCoverText,
+          coverReplaceInfo,
+        });
 
         const randomTemplate = TEMPLATE_OPTIONS[Math.floor(Math.random() * TEMPLATE_OPTIONS.length)];
         const coverPrompt = buildTemplateCoverPrompt(rewrittenCoverText, randomTemplate);
@@ -858,17 +1053,15 @@ export default function RewriteModule() {
           signal: controller.signal,
         });
 
-        if (
-          controller.signal.aborted ||
-          rewriteAbortControllersRef.current.get(resultId) !== controller
-        ) {
+        if (!isCurrentRunActive()) {
           return;
         }
 
+        const rewrittenCover = coverRes.imageUrl || "";
         const nextEditBaseline = buildTrackedEditBaseline({
           rewrittenTitle,
           rewrittenBody,
-          rewrittenCover: coverRes.imageUrl || "",
+          rewrittenCover,
           rewrittenCoverText,
           rewrittenTags: result.rewrittenTags,
           publishPersona: result.publishPersona,
@@ -883,12 +1076,14 @@ export default function RewriteModule() {
           },
           rewrittenTitle,
           rewrittenBody,
-          rewrittenCover: coverRes.imageUrl || "",
+          rewrittenCover,
           rewrittenCoverText,
           titleReplaceInfo,
           bodyReplaceInfo,
           coverReplaceInfo,
           editBaseline: nextEditBaseline,
+          fieldModifiedAt: undefined,
+          lastModifiedAt: getCurrentIsoTimestamp(),
         });
       } catch (e: unknown) {
         if (controller.signal.aborted || isAbortError(e)) {
@@ -1236,6 +1431,14 @@ export default function RewriteModule() {
   ).length;
   const allResultIds = rewriteResults.map((item) => item.id);
   const allSelected = allResultIds.length > 0 && allResultIds.every((id) => selectedRewriteIds.has(id));
+
+  function handleToggleBulkExpanded() {
+    setBulkExpanded((current) => {
+      const next = !current;
+      setBulkExpandVersion((version) => version + 1);
+      return next;
+    });
+  }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -1592,37 +1795,50 @@ export default function RewriteModule() {
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         {rewriteResults.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-gray-400">
             <Sparkles className="w-12 h-12 mb-3 opacity-30" />
             <p className="text-sm">请先在「爆款库」选择笔记并点击一键二创</p>
           </div>
         ) : (
-          <div className="space-y-3 px-3 py-3">
-            {rewriteResults.map((result, index) => (
-              <RewriteRow
-                key={result.id}
-                sequenceNumber={index + 1}
-                result={result}
-                originalNote={getLiveOriginalNote(result, collectRecordMap)}
-                selected={selectedRewriteIds.has(result.id)}
-                onToggleSelect={() => toggleRewriteSelect(result.id)}
-                onUpdate={(updates) => updateRewriteResult(result.id, updates)}
-                onRetry={() => startRewrite(result.id)}
-                onToggleProcessing={() => toggleRewriteProcessing(result.id)}
-                onRetryField={(field) => retryRewriteField(result.id, field)}
-                onDelete={() => {
-                  const controller = rewriteAbortControllersRef.current.get(result.id);
-                  if (controller) {
-                    controller.abort();
-                    rewriteAbortControllersRef.current.delete(result.id);
-                  }
-                  deleteRewriteResults([result.id]);
-                }}
-              />
-            ))}
-          </div>
+          <>
+            <div className="sticky top-0 z-20 flex justify-end px-3 pb-2 pt-3 bg-gradient-to-b from-white via-white/95 to-white/0">
+              <button
+                onClick={handleToggleBulkExpanded}
+                className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white/90 px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:border-gray-300 hover:bg-white hover:text-gray-800"
+              >
+                {bulkExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                {bulkExpanded ? "全部收起" : "全部展开"}
+              </button>
+            </div>
+            <div className="space-y-3 px-3 pb-3">
+              {rewriteResults.map((result, index) => (
+                <RewriteRow
+                  key={result.id}
+                  sequenceNumber={index + 1}
+                  result={result}
+                  originalNote={getLiveOriginalNote(result, collectRecordMap)}
+                  selected={selectedRewriteIds.has(result.id)}
+                  bulkExpanded={bulkExpanded}
+                  bulkExpandVersion={bulkExpandVersion}
+                  onToggleSelect={() => toggleRewriteSelect(result.id)}
+                  onUpdate={(updates) => updateRewriteResult(result.id, updates)}
+                  onRetry={() => startRewrite(result.id)}
+                  onToggleProcessing={() => toggleRewriteProcessing(result.id)}
+                  onRetryField={(field) => retryRewriteField(result.id, field)}
+                  onDelete={() => {
+                    const controller = rewriteAbortControllersRef.current.get(result.id);
+                    if (controller) {
+                      controller.abort();
+                      rewriteAbortControllersRef.current.delete(result.id);
+                    }
+                    deleteRewriteResults([result.id]);
+                  }}
+                />
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -1634,6 +1850,8 @@ function RewriteRow({
   result,
   originalNote,
   selected,
+  bulkExpanded,
+  bulkExpandVersion,
   onToggleSelect,
   onUpdate,
   onRetry,
@@ -1645,6 +1863,8 @@ function RewriteRow({
   result: RewriteResult;
   originalNote: RewriteResult["originalNote"];
   selected: boolean;
+  bulkExpanded: boolean;
+  bulkExpandVersion: number;
   onToggleSelect: () => void;
   onUpdate: (updates: Partial<RewriteResult>) => void;
   onRetry: () => void;
@@ -1658,6 +1878,9 @@ function RewriteRow({
   const [editingCoverText, setEditingCoverText] = useState(false);
   const [editingRewrittenTags, setEditingRewrittenTags] = useState(false);
   const [draftOverrides, setDraftOverrides] = useState<Partial<RewriteEditBaseline>>({});
+  const [draftFieldModifiedAt, setDraftFieldModifiedAt] = useState<
+    Partial<Record<keyof RewriteEditBaseline, string>>
+  >({});
   const [showTemplates, setShowTemplates] = useState(false);
   const [generatingCover, setGeneratingCover] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
@@ -1680,16 +1903,68 @@ function RewriteRow({
   const selectedPublishPersona = (result.publishPersona || "").trim();
   const isSaved = isRewriteResultSaved(result, note);
   const editedCategories = getEditedRewriteCategories(result, draftOverrides);
+  const effectiveFieldModifiedAt = getEffectiveFieldModifiedAt(result);
+  const isProcessing = result.status === "processing";
+  const canEditGeneratedFields = result.status !== "processing";
+  const showInlineTitleLoading = isProcessing && !result.rewrittenTitle;
+  const showInlineBodyLoading = isProcessing && !result.rewrittenBody;
+  const showInlineCoverTextLoading = isProcessing && !result.rewrittenCoverText;
+  const showInlineCoverLoading = (isProcessing && !result.rewrittenCover) || generatingCover;
+  const latestModifiedLabel = formatRewriteModifiedTime(
+    pickMostRecentTimestamp(
+      ...EDITED_CATEGORY_ORDER.map((field) => draftFieldModifiedAt[field]),
+      ...EDITED_CATEGORY_ORDER.map((field) => effectiveFieldModifiedAt?.[field]),
+      result.lastModifiedAt,
+      note.rewriteDate
+    )
+  );
   const sequenceLabel = sequenceNumber.toString().padStart(2, "0");
+
+  useEffect(() => {
+    setExpanded(bulkExpanded);
+  }, [bulkExpanded, bulkExpandVersion]);
+
+  function getCurrentEditableValue<K extends keyof RewriteEditBaseline>(
+    field: K
+  ): RewriteEditBaseline[K] {
+    return getTrackedResultValue(result, field);
+  }
 
   function setDraftOverride<K extends keyof RewriteEditBaseline>(
     field: K,
     value: RewriteEditBaseline[K]
   ) {
-    setDraftOverrides((current) => ({
-      ...current,
-      [field]: value,
-    }));
+    const currentValue = getCurrentEditableValue(field);
+    const changed = !isTrackedEditValueEqual(value, currentValue);
+    const timestamp = getCurrentIsoTimestamp();
+
+    setDraftOverrides((current) => {
+      if (!changed) {
+        if (!(field in current)) return current;
+        const next = { ...current };
+        delete next[field];
+        return next;
+      }
+
+      return {
+        ...current,
+        [field]: Array.isArray(value) ? [...value] : value,
+      };
+    });
+
+    setDraftFieldModifiedAt((current) => {
+      if (!changed) {
+        if (!(field in current)) return current;
+        const next = { ...current };
+        delete next[field];
+        return next;
+      }
+
+      return {
+        ...current,
+        [field]: timestamp,
+      };
+    });
   }
 
   function clearDraftOverride(field: keyof RewriteEditBaseline) {
@@ -1699,10 +1974,63 @@ function RewriteRow({
       delete next[field];
       return next;
     });
+    setDraftFieldModifiedAt((current) => {
+      if (!(field in current)) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  }
+
+  function hasMeaningfulResultChange(updates: Partial<RewriteResult>) {
+    const trackedFields: Array<keyof RewriteEditBaseline> = [
+      "rewrittenCover",
+      "publishPersona",
+      "rewrittenTitle",
+      "rewrittenBody",
+      "rewrittenTags",
+      "rewrittenCoverText",
+    ];
+
+    return trackedFields.some((field) => {
+      if (!(field in updates)) return false;
+      const nextValue = updates[field];
+      const currentValue = getCurrentEditableValue(field);
+
+      if (Array.isArray(nextValue) && Array.isArray(currentValue)) {
+        return JSON.stringify(nextValue) !== JSON.stringify(currentValue);
+      }
+
+      return nextValue !== currentValue;
+    });
+  }
+
+  function applyManualUpdate(updates: Partial<RewriteResult>) {
+    if (hasMeaningfulResultChange(updates)) {
+      const timestamp = getCurrentIsoTimestamp();
+      const nextFieldModifiedAt = buildNextFieldModifiedAt(
+        result,
+        updates,
+        timestamp,
+        effectiveFieldModifiedAt
+      );
+      const migratingLegacyFieldTime = !result.fieldModifiedAt && Boolean(effectiveFieldModifiedAt);
+
+      onUpdate({
+        ...updates,
+        fieldModifiedAt: nextFieldModifiedAt,
+        ...(migratingLegacyFieldTime && !nextFieldModifiedAt
+          ? { lastModifiedAt: note.rewriteDate || undefined }
+          : {}),
+      });
+      return;
+    }
+
+    onUpdate(updates);
   }
 
   function handlePublishPersonaSelect(value: string) {
-    onUpdate({ publishPersona: selectedPublishPersona === value ? "" : value });
+    applyManualUpdate({ publishPersona: selectedPublishPersona === value ? "" : value });
   }
 
   async function handleRetryField(field: RetryableRewriteField) {
@@ -1748,7 +2076,7 @@ function RewriteRow({
         resolution: "2k",
         templateSrc: template.src,
       });
-      onUpdate({ rewrittenCover: data.imageUrl });
+      applyManualUpdate({ rewrittenCover: data.imageUrl });
     } catch (e: unknown) {
       console.error("生成封面失败:", e);
     } finally {
@@ -1768,7 +2096,7 @@ function RewriteRow({
         referenceImageSrc:
           editDialog.mode === "image" ? editDialog.sourceImageSrc : "",
       });
-      onUpdate({
+      applyManualUpdate({
         rewrittenCover: data.imageUrl,
       });
       setEditDialog(null);
@@ -1826,6 +2154,11 @@ function RewriteRow({
           )}
 
           <span className="flex-1 text-sm text-gray-600 truncate">{displayTitle}</span>
+          {latestModifiedLabel && (
+            <span className="shrink-0 whitespace-nowrap text-xs text-gray-400">
+              {latestModifiedLabel}
+            </span>
+          )}
 
           {(result.status === "processing" || result.status === "stopped") && (
             <button
@@ -1935,24 +2268,18 @@ function RewriteRow({
               </div>
 
               <div className="relative bg-white border border-gray-200 rounded-xl p-3 space-y-2">
-                <div className="absolute right-3 top-px z-10">
+                <div className="absolute right-3 top-0 z-10">
                   <PublishPersonaRail
                     options={PUBLISH_PERSONA_OPTIONS}
                     value={selectedPublishPersona}
                     onSelect={handlePublishPersonaSelect}
+                    disabled={isProcessing}
                   />
                 </div>
 
-                {result.status === "processing" && (
-                  <div className="flex items-center gap-2 py-8 justify-center text-gray-400">
-                    <div className="w-5 h-5 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm">AI 生成中...</span>
-                  </div>
-                )}
-
                 {result.status === "stopped" && (
-                  <div className="py-4 text-center">
-                    <p className="mb-2 text-sm text-amber-500">已停止生成</p>
+                  <div className="rounded-lg bg-amber-50/70 px-2.5 py-2 text-xs text-amber-600">
+                    <p className="mb-1">已停止生成</p>
                     <button onClick={onToggleProcessing} className="text-xs text-sky-500 hover:underline">
                       继续生成
                     </button>
@@ -1960,195 +2287,216 @@ function RewriteRow({
                 )}
 
                 {result.status === "error" && (
-                  <div className="py-4 text-center">
-                    <p className="text-sm text-red-500 mb-2">{result.errorMsg}</p>
+                  <div className="rounded-lg bg-red-50/80 px-2.5 py-2 text-xs text-red-500">
+                    <p className="mb-1">{result.errorMsg}</p>
                     <button onClick={onRetry} className="text-xs text-red-500 hover:underline">
                       重试
                     </button>
                   </div>
                 )}
 
-                {result.status === "done" && (
-                  <>
-                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                      二创封面
-                    </p>
-                    <div className="space-y-1">
-                      <div className="flex items-start gap-2">
-                        <div className="relative aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden w-24 flex-shrink-0 group">
-                          {generatingCover ? (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <div className="w-5 h-5 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
-                            </div>
-                          ) : result.rewrittenCover ? (
-                            <>
-                              <Image
-                                src={result.rewrittenCover}
-                                alt="二创封面"
-                                fill
-                                sizes="96px"
-                                className="object-cover"
-                                unoptimized
-                              />
+                <>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    二创封面
+                  </p>
+                  <div className="space-y-1">
+                    <div className="flex items-start gap-2">
+                      <div className="relative aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden w-24 flex-shrink-0 group">
+                        {showInlineCoverLoading ? (
+                          <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-b from-gray-50 to-gray-100 text-[11px] text-gray-400">
+                            <div className="h-5 w-5 rounded-full border-2 border-red-300 border-t-transparent animate-spin" />
+                            <span>封面生成中</span>
+                          </div>
+                        ) : result.rewrittenCover ? (
+                          <>
+                            <Image
+                              src={result.rewrittenCover}
+                              alt="二创封面"
+                              fill
+                              sizes="96px"
+                              className="object-cover"
+                              unoptimized
+                            />
+                            {canEditGeneratedFields && (
                               <HoverImageActions
                                 onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "二创封面预览" })}
                                 onEdit={() => openCoverEditDialog("text")}
                               />
-                            </>
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs text-center px-1">
-                              未生成
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex flex-col gap-1">
-                          <label className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 cursor-pointer border border-gray-200 rounded px-2 py-1">
-                            <Upload className="w-3 h-3" />
-                            上传图片
-                            <input
-                              type="file"
-                              accept="image/*"
-                              className="hidden"
-                              onChange={async (e) => {
-                                const file = e.target.files?.[0];
-                                e.currentTarget.value = "";
-                                if (!file) return;
-                                try {
-                                  const dataUrl = await readFileAsDataUrl(file);
-                                  onUpdate({ rewrittenCover: dataUrl });
-                                } catch (error) {
-                                  console.error("读取上传图片失败:", error);
-                                }
-                              }}
-                            />
-                          </label>
-                          <button
-                            onClick={() => setShowTemplates(!showTemplates)}
-                            disabled={!result.rewrittenCoverText || generatingCover}
-                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
-                          >
-                            <Sparkles className="w-3 h-3" />
-                            模板生图
-                          </button>
-                        </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs text-center px-1">
+                            未生成
+                          </div>
+                        )}
                       </div>
-
-                      {showTemplates && (
-                        <div className="mt-2 p-2 bg-gray-50 rounded-lg">
-                          <div className="flex items-center justify-between mb-1.5">
-                            <p className="text-xs text-gray-500">选择模板</p>
-                            <button onClick={() => setShowTemplates(false)}>
-                              <X className="w-3.5 h-3.5 text-gray-400" />
-                            </button>
-                          </div>
-                          <div className="grid grid-cols-5 gap-1.5">
-                            {TEMPLATE_OPTIONS.map((template) => (
-                              <button
-                                key={template.id}
-                                onClick={() => generateCoverFromTemplate(template)}
-                                className="relative aspect-[3/4] rounded overflow-hidden hover:ring-2 hover:ring-red-400 transition-all group"
-                              >
-                                <Image
-                                  src={template.src}
-                                  alt={`模板${template.id}`}
-                                  fill
-                                  sizes="80px"
-                                  className="object-cover"
-                                />
-                                <HoverImageActions
-                                  small
-                                  onPreview={() => setPreviewImage({ src: template.src, title: `模板 ${template.id}` })}
-                                  onEdit={() => openTemplateEditDialog(template)}
-                                />
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                      <div className="flex flex-col gap-1">
+                        <label
+                          className={clsx(
+                            "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
+                            canEditGeneratedFields
+                              ? "cursor-pointer text-gray-500 hover:text-gray-700"
+                              : "cursor-not-allowed text-gray-300"
+                          )}
+                        >
+                          <Upload className="w-3 h-3" />
+                          上传图片
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            disabled={!canEditGeneratedFields}
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              e.currentTarget.value = "";
+                              if (!file || !canEditGeneratedFields) return;
+                              try {
+                                const dataUrl = await readFileAsDataUrl(file);
+                                applyManualUpdate({ rewrittenCover: dataUrl });
+                              } catch (error) {
+                                console.error("读取上传图片失败:", error);
+                              }
+                            }}
+                          />
+                        </label>
+                        <button
+                          onClick={() => setShowTemplates(!showTemplates)}
+                          disabled={!result.rewrittenCoverText || generatingCover || !canEditGeneratedFields}
+                          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          模板生图
+                        </button>
+                      </div>
                     </div>
 
-                    <EditableField
-                      label="二创封面文案"
-                      value={result.rewrittenCoverText}
-                      editing={editingCoverText}
-                      retrying={retryingFields.coverText}
-                      onEdit={() => {
-                        setDraftOverride("rewrittenCoverText", result.rewrittenCoverText);
-                        setEditingCoverText(true);
-                      }}
-                      onRetry={() => handleRetryField("coverText")}
-                      onDraftChange={(value) => setDraftOverride("rewrittenCoverText", value)}
-                      onSave={(value) => {
-                        onUpdate({ rewrittenCoverText: value });
-                        clearDraftOverride("rewrittenCoverText");
-                        setEditingCoverText(false);
-                      }}
-                      onCancel={() => {
-                        clearDraftOverride("rewrittenCoverText");
-                        setEditingCoverText(false);
-                      }}
-                      multiline
-                    />
+                    {showTemplates && canEditGeneratedFields && (
+                      <div className="mt-2 p-2 bg-gray-50 rounded-lg">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <p className="text-xs text-gray-500">选择模板</p>
+                          <button onClick={() => setShowTemplates(false)}>
+                            <X className="w-3.5 h-3.5 text-gray-400" />
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-5 gap-1.5">
+                          {TEMPLATE_OPTIONS.map((template) => (
+                            <button
+                              key={template.id}
+                              onClick={() => generateCoverFromTemplate(template)}
+                              className="relative aspect-[3/4] rounded overflow-hidden hover:ring-2 hover:ring-red-400 transition-all group"
+                            >
+                              <Image
+                                src={template.src}
+                                alt={`模板${template.id}`}
+                                fill
+                                sizes="80px"
+                                className="object-cover"
+                              />
+                              <HoverImageActions
+                                small
+                                onPreview={() => setPreviewImage({ src: template.src, title: `模板 ${template.id}` })}
+                                onEdit={() => openTemplateEditDialog(template)}
+                              />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
 
-                    <EditableField
-                      label="二创标题"
-                      value={result.rewrittenTitle}
-                      editing={editingTitle}
-                      retrying={retryingFields.title}
-                      onEdit={() => {
-                        setDraftOverride("rewrittenTitle", result.rewrittenTitle);
-                        setEditingTitle(true);
-                      }}
-                      onRetry={() => handleRetryField("title")}
-                      onDraftChange={(value) => setDraftOverride("rewrittenTitle", value)}
-                      onSave={(value) => {
-                        onUpdate({ rewrittenTitle: value });
-                        clearDraftOverride("rewrittenTitle");
-                        setEditingTitle(false);
-                      }}
-                      onCancel={() => {
-                        clearDraftOverride("rewrittenTitle");
-                        setEditingTitle(false);
-                      }}
-                      multiline={false}
-                    />
+                  <EditableField
+                    label="二创封面文案"
+                    value={result.rewrittenCoverText}
+                    editing={editingCoverText}
+                    retrying={retryingFields.coverText}
+                    disabled={!canEditGeneratedFields}
+                    loading={showInlineCoverTextLoading}
+                    loadingLabel="二创封面文案生成中"
+                    onEdit={() => {
+                      setDraftOverride("rewrittenCoverText", result.rewrittenCoverText);
+                      setEditingCoverText(true);
+                    }}
+                    onRetry={() => handleRetryField("coverText")}
+                    onDraftChange={(value) => setDraftOverride("rewrittenCoverText", value)}
+                    onSave={(value) => {
+                      applyManualUpdate({ rewrittenCoverText: value });
+                      clearDraftOverride("rewrittenCoverText");
+                      setEditingCoverText(false);
+                    }}
+                    onCancel={() => {
+                      clearDraftOverride("rewrittenCoverText");
+                      setEditingCoverText(false);
+                    }}
+                    multiline
+                  />
 
-                    <EditableField
-                      label="二创正文"
-                      value={result.rewrittenBody}
-                      editing={editingBody}
-                      retrying={retryingFields.body}
-                      onEdit={() => {
-                        setDraftOverride("rewrittenBody", result.rewrittenBody);
-                        setEditingBody(true);
-                      }}
-                      onRetry={() => handleRetryField("body")}
-                      onDraftChange={(value) => setDraftOverride("rewrittenBody", value)}
-                      onSave={(value) => {
-                        onUpdate({ rewrittenBody: normalizeRewrittenBody(value, note.originalBody || "") });
-                        clearDraftOverride("rewrittenBody");
-                        setEditingBody(false);
-                      }}
-                      onCancel={() => {
-                        clearDraftOverride("rewrittenBody");
-                        setEditingBody(false);
-                      }}
-                      multiline
-                    />
-                  </>
-                )}
+                  <EditableField
+                    label="二创标题"
+                    value={result.rewrittenTitle}
+                    editing={editingTitle}
+                    retrying={retryingFields.title}
+                    disabled={!canEditGeneratedFields}
+                    loading={showInlineTitleLoading}
+                    loadingLabel="二创标题生成中"
+                    onEdit={() => {
+                      setDraftOverride("rewrittenTitle", result.rewrittenTitle);
+                      setEditingTitle(true);
+                    }}
+                    onRetry={() => handleRetryField("title")}
+                    onDraftChange={(value) => setDraftOverride("rewrittenTitle", value)}
+                    onSave={(value) => {
+                      applyManualUpdate({ rewrittenTitle: value });
+                      clearDraftOverride("rewrittenTitle");
+                      setEditingTitle(false);
+                    }}
+                    onCancel={() => {
+                      clearDraftOverride("rewrittenTitle");
+                      setEditingTitle(false);
+                    }}
+                    multiline={false}
+                  />
+
+                  <EditableField
+                    label="二创正文"
+                    value={result.rewrittenBody}
+                    editing={editingBody}
+                    retrying={retryingFields.body}
+                    disabled={!canEditGeneratedFields}
+                    loading={showInlineBodyLoading}
+                    loadingLabel="二创正文生成中"
+                    onEdit={() => {
+                      setDraftOverride("rewrittenBody", result.rewrittenBody);
+                      setEditingBody(true);
+                    }}
+                    onRetry={() => handleRetryField("body")}
+                    onDraftChange={(value) => setDraftOverride("rewrittenBody", value)}
+                    onSave={(value) => {
+                      applyManualUpdate({
+                        rewrittenBody: normalizeRewrittenBody(value, note.originalBody || ""),
+                      });
+                      clearDraftOverride("rewrittenBody");
+                      setEditingBody(false);
+                    }}
+                    onCancel={() => {
+                      clearDraftOverride("rewrittenBody");
+                      setEditingBody(false);
+                    }}
+                    multiline
+                  />
+                </>
 
                 <EditableTagsField
                   label="二创标签"
                   tags={rewrittenTags}
                   editing={editingRewrittenTags}
+                  disabled={!canEditGeneratedFields}
                   onEdit={() => {
                     setDraftOverride("rewrittenTags", rewrittenTags);
                     setEditingRewrittenTags(true);
                   }}
                   onDraftChange={(nextTags) => setDraftOverride("rewrittenTags", nextTags)}
                   onSave={(nextTags) => {
-                    onUpdate({ rewrittenTags: nextTags });
+                    applyManualUpdate({ rewrittenTags: nextTags });
                     clearDraftOverride("rewrittenTags");
                     setEditingRewrittenTags(false);
                   }}
@@ -2426,10 +2774,12 @@ function PublishPersonaRail({
   options,
   value,
   onSelect,
+  disabled = false,
 }: {
   options: readonly string[];
   value: string;
   onSelect: (value: string) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-start justify-end gap-1.5">
@@ -2440,13 +2790,18 @@ function PublishPersonaRail({
           <div key={option} className="flex justify-end">
             <button
               type="button"
-              onClick={() => onSelect(option)}
+              onClick={() => {
+                if (disabled) return;
+                onSelect(option);
+              }}
+              disabled={disabled}
               className={clsx(
                 "inline-flex w-[72px] items-center justify-center rounded-b-[16px] border px-2 text-[11px] font-medium leading-none whitespace-nowrap text-center",
-                "transition-[height,background-color,border-color,color,box-shadow] duration-200 ease-out",
+                "h-8 transition-colors duration-200 ease-out",
                 selected
-                  ? "h-10 border-stone-300 bg-[#efe7d8] text-[#7a6447] shadow-[0_4px_10px_rgba(122,100,71,0.10)]"
-                  : "h-8 border-stone-200 bg-[#f7f4ee] text-stone-500 hover:border-stone-300 hover:bg-[#f2ede3]"
+                  ? "border-amber-200 bg-[#fff4dd] text-[#9a6a1f]"
+                  : "border-stone-200 bg-[#f7f4ee] text-stone-500 hover:border-amber-200 hover:bg-[#fff4dd] hover:text-[#9a6a1f]",
+                disabled && "cursor-not-allowed opacity-60"
               )}
               title={selected ? `取消${option}` : `设为${option}`}
             >
@@ -2468,6 +2823,7 @@ function EditableTagsField({
   onSave,
   onCancel,
   chipClassName,
+  disabled = false,
 }: {
   label: string;
   tags: string[];
@@ -2477,6 +2833,7 @@ function EditableTagsField({
   onSave: (tags: string[]) => void;
   onCancel: () => void;
   chipClassName: string;
+  disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(formatTagDraft(tags));
 
@@ -2491,10 +2848,15 @@ function EditableTagsField({
         {!editing && (
           <button
             onClick={() => {
+              if (disabled) return;
               setDraft(formatTagDraft(tags));
               onEdit();
             }}
-            className="text-xs text-gray-400 hover:text-gray-600"
+            disabled={disabled}
+            className={clsx(
+              "text-xs transition-colors",
+              disabled ? "cursor-not-allowed text-gray-300" : "text-gray-400 hover:text-gray-600"
+            )}
           >
             <Edit3 className="w-3 h-3" />
           </button>
@@ -2577,11 +2939,23 @@ function StatusBadge({
   );
 }
 
+function LoadingInlineIndicator({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2 py-1 text-xs text-gray-400">
+      <div className="h-3.5 w-3.5 rounded-full border-2 border-red-300 border-t-transparent animate-spin" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
 function EditableField({
   label,
   value,
   editing,
   retrying = false,
+  disabled = false,
+  loading = false,
+  loadingLabel,
   onEdit,
   onRetry,
   onDraftChange,
@@ -2593,6 +2967,9 @@ function EditableField({
   value: string;
   editing: boolean;
   retrying?: boolean;
+  disabled?: boolean;
+  loading?: boolean;
+  loadingLabel?: string;
   onEdit: () => void;
   onRetry?: () => void | Promise<void>;
   onDraftChange?: (value: string) => void;
@@ -2611,12 +2988,14 @@ function EditableField({
             {onRetry && (
               <button
                 onClick={() => void onRetry()}
-                disabled={retrying}
+                disabled={retrying || disabled}
                 title={`重新生成${label}`}
                 aria-label={`重新生成${label}`}
                 className={clsx(
                   "text-xs transition-colors",
-                  retrying ? "cursor-not-allowed text-gray-300" : "text-gray-400 hover:text-gray-600"
+                  retrying || disabled
+                    ? "cursor-not-allowed text-gray-300"
+                    : "text-gray-400 hover:text-gray-600"
                 )}
               >
                 <RotateCcw className={clsx("w-3 h-3", retrying && "animate-spin")} />
@@ -2624,13 +3003,16 @@ function EditableField({
             )}
             <button
               onClick={() => {
+                if (disabled) return;
                 setDraft(value);
                 onEdit();
               }}
-              disabled={retrying}
+              disabled={retrying || disabled}
               className={clsx(
                 "text-xs transition-colors",
-                retrying ? "cursor-not-allowed text-gray-300" : "text-gray-400 hover:text-gray-600"
+                retrying || disabled
+                  ? "cursor-not-allowed text-gray-300"
+                  : "text-gray-400 hover:text-gray-600"
               )}
             >
               <Edit3 className="w-3 h-3" />
@@ -2680,6 +3062,8 @@ function EditableField({
             </button>
           </div>
         </div>
+      ) : loading && !value ? (
+        <LoadingInlineIndicator label={loadingLabel || `${label}生成中`} />
       ) : (
         <p className="text-xs text-gray-800 whitespace-pre-wrap leading-relaxed max-h-32 overflow-y-auto">
           {value || "—"}

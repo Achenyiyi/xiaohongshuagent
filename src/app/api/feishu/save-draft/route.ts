@@ -430,7 +430,7 @@ async function buildImageUploadPayload(
     const resp = await fetchImageResponse(sourceUrl);
 
     if (!resp.ok) {
-      throw new Error(`图片下载失败: ${fileName}`);
+      throw new Error(`图片下载失败，链接可能已失效: ${fileName}`);
     }
 
     buffer = await resp.arrayBuffer();

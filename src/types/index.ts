@@ -77,6 +77,8 @@ export interface RewriteResult {
   coverReplaceInfo: string; // 本次封面文案生成实际使用的替换信息
   editBaseline?: RewriteEditBaseline; // 记录 AI 初始结果，用于判断是否被人工修改
   savedFingerprint?: string; // 当前版本最近一次成功保存的指纹
+  fieldModifiedAt?: Partial<Record<keyof RewriteEditBaseline, string>>; // 各字段当前有效修改时间
+  lastModifiedAt?: string; // 最近一次修改时间
   status: 'pending' | 'processing' | 'done' | 'error' | 'stopped';
   errorMsg?: string;
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { fetchImageAsDataUrl } from "@/lib/serverImage";
 
 const JIMENG_BASE_URL = runtimeConfig.jimeng.apiBaseUrl;
 const JIMENG_SESSION_ID = runtimeConfig.jimeng.sessionId;
@@ -78,6 +79,19 @@ function extractJimengImageUrl(data: JimengResponsePayload): string | null {
   return data?.data?.[0]?.url || data?.data?.[0]?.b64_json || null;
 }
 
+function normalizeJimengImageResult(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error("即梦API未返回图片内容");
+  }
+
+  if (/^https?:\/\//i.test(trimmed) || /^data:/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `data:image/png;base64,${trimmed}`;
+}
+
 async function requestJimengImage(endpoint: string, body: Record<string, unknown>) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), JIMENG_REQUEST_TIMEOUT_MS);
@@ -150,9 +164,12 @@ export async function POST(req: NextRequest) {
           ratio,
           resolution,
         };
-    const imageUrl = await requestJimengImage(endpoint, body);
+    const imageUrl = normalizeJimengImageResult(await requestJimengImage(endpoint, body));
+    const stableImageUrl = /^https?:\/\//i.test(imageUrl)
+      ? await fetchImageAsDataUrl(imageUrl)
+      : imageUrl;
 
-    return NextResponse.json({ imageUrl });
+    return NextResponse.json({ imageUrl: stableImageUrl });
   } catch (e: unknown) {
     console.error("Jimeng generate error:", e);
     return NextResponse.json(
