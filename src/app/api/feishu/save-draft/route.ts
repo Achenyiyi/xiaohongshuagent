@@ -3,6 +3,7 @@ import {
   createRecordsInTable,
   updateCollectRecords,
   getTableFields,
+  getRecordInTable,
   addTableField,
   TABLE_ID,
   uploadAttachmentToBitable,
@@ -37,10 +38,11 @@ const FIELD_TYPE_SINGLE_SELECT = 3;
 const FIELD_TYPE_DATETIME = 5;
 const FIELD_TYPE_ATTACHMENT = 17;
 const COMBINED_REPLACE_INFO_FIELD_NAME = "二创替换信息";
+const REFERENCE_COVER_FIELD_NAME = "参考封面";
 type PromptMode = "default" | "custom";
 const REWRITE_TABLE_FIELDS = [
   { field_name: "二创日期", type: FIELD_TYPE_DATETIME },
-  { field_name: "封面", type: FIELD_TYPE_ATTACHMENT },
+  { field_name: REFERENCE_COVER_FIELD_NAME, type: FIELD_TYPE_ATTACHMENT },
   { field_name: "封面文案", type: FIELD_TYPE_TEXT },
   { field_name: "标题", type: FIELD_TYPE_TEXT },
   { field_name: "正文", type: FIELD_TYPE_TEXT },
@@ -397,6 +399,26 @@ function isDataImageUrl(value: string) {
   return /^data:image\/[a-zA-Z0-9.+-]+;base64,/i.test(value);
 }
 
+function toAttachmentToken(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0) return "";
+
+  const first = value[0];
+  if (!first || typeof first !== "object") return "";
+
+  const attachment = first as Record<string, unknown>;
+  return String(attachment.file_token || attachment.token || "");
+}
+
+function toAttachmentUrl(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0) return "";
+
+  const first = value[0];
+  if (!first || typeof first !== "object") return "";
+
+  const attachment = first as Record<string, unknown>;
+  return String(attachment.tmp_url || attachment.url || attachment.link || "");
+}
+
 function dataImageToUploadPayload(value: string) {
   const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i);
   if (!match) {
@@ -490,7 +512,7 @@ async function ensureRewriteTable() {
     FIELD_TYPE_SINGLE_SELECT,
     "二创库字段「发布人设」当前不是单选字段，无法写入人设。请在飞书里把它改成单选字段。"
   );
-  assertFieldTypeOrThrow(fieldTypeMap, "封面", FIELD_TYPE_ATTACHMENT);
+  assertFieldTypeOrThrow(fieldTypeMap, REFERENCE_COVER_FIELD_NAME, FIELD_TYPE_ATTACHMENT);
   assertFieldTypeOrThrow(fieldTypeMap, "二创封面", FIELD_TYPE_ATTACHMENT);
 
   return {
@@ -566,7 +588,7 @@ function buildRewriteTableFields(params: {
   setIfFieldHasValue(fields, targetFieldTypeMap, "源记录ID", result.originalNote.recordId);
 
   if (originalCoverAttachment) {
-    fields["封面"] = [originalCoverAttachment];
+    fields[REFERENCE_COVER_FIELD_NAME] = [originalCoverAttachment];
   }
   if (draftCoverAttachment) {
     fields["二创封面"] = [draftCoverAttachment];
@@ -641,16 +663,41 @@ export async function POST(req: NextRequest) {
 
     async function getOriginalCoverAttachment(result: RewriteResult) {
       const sourceRecordId = result.originalNote.recordId || result.recordId;
+      const coverAttachmentToken = (result.originalNote.coverAttachmentToken || "").trim();
+      if (coverAttachmentToken) {
+        return { file_token: coverAttachmentToken };
+      }
+
       if (!sourceRecordId || !result.originalNote.cover) return null;
 
       let task = originalCoverAttachmentTasks.get(sourceRecordId);
       if (!task) {
         task = (async () => {
           try {
+            let latestCoverUrl = result.originalNote.cover;
+
+            try {
+              const sourceRecord = await withRetry(
+                () => getRecordInTable(TABLE_ID, sourceRecordId),
+                `读取原封面记录 ${sourceRecordId}`
+              );
+              const latestCoverField = sourceRecord.record.fields["封面"];
+              const latestAttachmentToken = toAttachmentToken(latestCoverField);
+              if (latestAttachmentToken) {
+                return { file_token: latestAttachmentToken };
+              }
+
+              latestCoverUrl = toAttachmentUrl(latestCoverField) || latestCoverUrl;
+            } catch (error) {
+              console.warn(
+                `读取采集表原封面失败，继续使用当前快照 ${sourceRecordId}: ${getErrorMessage(error)}`
+              );
+            }
+
             return await withRetry(
               () =>
                 uploadImageAttachment(
-                  result.originalNote.cover,
+                  latestCoverUrl,
                   `original-cover-${sourceRecordId}`
                 ),
               `上传原封面 ${sourceRecordId}`

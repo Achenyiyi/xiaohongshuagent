@@ -30,6 +30,7 @@ export interface FeishuCollectRecord {
   commentCount: number; // 评论数
   shareCount: number; // 转发数
   cover: string; // 封面
+  coverAttachmentToken?: string; // 原封面附件 token
   coverText: string; // 封面文案
   // 二创相关字段
   rewriteTitleReplaceInfo?: string; // 标题替换信息

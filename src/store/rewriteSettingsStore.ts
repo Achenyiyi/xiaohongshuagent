@@ -14,6 +14,12 @@ export interface ReplaceEntryDraft {
 
 export type ReplaceLibraryScope = "title" | "body" | "cover";
 
+const DEFAULT_SCOPE_ENABLEMENT: Record<ReplaceLibraryScope, boolean> = {
+  title: true,
+  body: true,
+  cover: true,
+};
+
 const DEFAULT_ENTRIES: ReplaceEntry[] = [
   { id: "preset-1", original: "公司类型", replacement: "初创传媒公司 / 初创电商公司" },
   { id: "preset-2", original: "地点", replacement: "深圳宝安" },
@@ -48,12 +54,16 @@ function createDefaultLibraries() {
   };
 }
 
+function createDefaultScopeEnablement() {
+  return { ...DEFAULT_SCOPE_ENABLEMENT };
+}
+
 interface RewriteSettingsState {
   hasHydrated: boolean;
   setHasHydrated: (hydrated: boolean) => void;
 
-  replaceLibraryEnabled: boolean;
-  setReplaceLibraryEnabled: (enabled: boolean) => void;
+  replaceLibraryEnabledByScope: Record<ReplaceLibraryScope, boolean>;
+  setReplaceLibraryScopeEnabled: (scope: ReplaceLibraryScope, enabled: boolean) => void;
 
   autoMergeExtractedEntries: boolean;
   setAutoMergeExtractedEntries: (enabled: boolean) => void;
@@ -115,8 +125,14 @@ export const useRewriteSettingsStore = create<RewriteSettingsState>()(
       hasHydrated: false,
       setHasHydrated: (hydrated) => set({ hasHydrated: hydrated }),
 
-      replaceLibraryEnabled: true,
-      setReplaceLibraryEnabled: (enabled) => set({ replaceLibraryEnabled: enabled }),
+      replaceLibraryEnabledByScope: createDefaultScopeEnablement(),
+      setReplaceLibraryScopeEnabled: (scope, enabled) =>
+        set((state) => ({
+          replaceLibraryEnabledByScope: {
+            ...state.replaceLibraryEnabledByScope,
+            [scope]: enabled,
+          },
+        })),
 
       autoMergeExtractedEntries: false,
       setAutoMergeExtractedEntries: (enabled) => set({ autoMergeExtractedEntries: enabled }),
@@ -191,12 +207,41 @@ export const useRewriteSettingsStore = create<RewriteSettingsState>()(
     }),
     {
       name: "xhs-app-rewrite-settings",
+      version: 2,
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
-        replaceLibraryEnabled: state.replaceLibraryEnabled,
+        replaceLibraryEnabledByScope: state.replaceLibraryEnabledByScope,
         autoMergeExtractedEntries: state.autoMergeExtractedEntries,
         replaceEntriesByScope: state.replaceEntriesByScope,
       }),
+      migrate: (persistedState) => {
+        const state = persistedState as {
+          replaceLibraryEnabled?: boolean;
+          replaceLibraryEnabledByScope?: Partial<Record<ReplaceLibraryScope, boolean>>;
+          autoMergeExtractedEntries?: boolean;
+          replaceEntriesByScope?: Record<ReplaceLibraryScope, ReplaceEntry[]>;
+        };
+        const legacyEnabled =
+          typeof state?.replaceLibraryEnabled === "boolean"
+            ? state.replaceLibraryEnabled
+            : undefined;
+        const persistedEnablement = state?.replaceLibraryEnabledByScope || {};
+
+        return {
+          ...state,
+          replaceLibraryEnabledByScope: {
+            ...createDefaultScopeEnablement(),
+            ...(legacyEnabled === undefined
+              ? {}
+              : {
+                  title: legacyEnabled,
+                  body: legacyEnabled,
+                  cover: legacyEnabled,
+                }),
+            ...persistedEnablement,
+          },
+        };
+      },
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);
       },

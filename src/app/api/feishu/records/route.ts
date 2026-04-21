@@ -126,6 +126,16 @@ function toAttachmentUrl(v: unknown): string {
   return "";
 }
 
+function toAttachmentToken(v: unknown): string {
+  if (!Array.isArray(v) || v.length === 0) return "";
+
+  const first = v[0];
+  if (!first || typeof first !== "object") return "";
+
+  const attachment = first as Record<string, unknown>;
+  return String(attachment.file_token || attachment.token || "");
+}
+
 function toAttachmentUrls(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v
@@ -258,6 +268,7 @@ export async function GET() {
         commentCount: toNum(f["评论数"]),
         shareCount: toNum(f["转发数"]),
         cover: toAttachmentUrl(f["封面"]),
+        coverAttachmentToken: toAttachmentToken(f["封面"]),
         coverText: toStr(f["封面文案"]),
         rewriteTitleReplaceInfo:
           toStr(f[REPLACE_INFO_FIELD_NAMES.title]) ||

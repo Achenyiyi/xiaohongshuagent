@@ -46,6 +46,7 @@ import type { RewriteEditBaseline, RewriteResult } from "@/types";
 import Image from "next/image";
 
 type RetryableRewriteField = "coverText" | "title" | "body";
+type SyncedMultilineField = "coverText" | "body";
 
 type ExtractedReplaceInfoByScope = Record<ReplaceLibraryScope, string[]>;
 type PendingExtractedEntriesByScope = Record<ReplaceLibraryScope, ReplaceEntryDraft[]>;
@@ -641,6 +642,13 @@ function getLiveOriginalNote(
 
   return {
     ...result.originalNote,
+    cover: liveRecord.cover || result.originalNote.cover,
+    coverAttachmentToken:
+      liveRecord.coverAttachmentToken || result.originalNote.coverAttachmentToken,
+    coverText: liveRecord.coverText || result.originalNote.coverText,
+    originalTitle: liveRecord.originalTitle || result.originalNote.originalTitle,
+    originalBody: liveRecord.originalBody || result.originalNote.originalBody,
+    originalTags: liveRecord.originalTags || result.originalNote.originalTags,
     hasRewritten: liveRecord.hasRewritten ?? result.originalNote.hasRewritten,
     rewriteDate: liveRecord.rewriteDate || result.originalNote.rewriteDate,
     publishPersona: liveRecord.publishPersona || result.originalNote.publishPersona,
@@ -663,8 +671,8 @@ export default function RewriteModule() {
   } = useAppStore();
 
   const {
-    replaceLibraryEnabled,
-    setReplaceLibraryEnabled,
+    replaceLibraryEnabledByScope,
+    setReplaceLibraryScopeEnabled,
     autoMergeExtractedEntries,
     setAutoMergeExtractedEntries,
     replaceEntriesByScope,
@@ -729,6 +737,17 @@ export default function RewriteModule() {
       })),
     }),
     [replaceEntriesByScope]
+  );
+
+  const enabledLibraryCount = useMemo(
+    () => LIBRARY_SCOPES.filter((item) => replaceLibraryEnabledByScope[item.scope]).length,
+    [replaceLibraryEnabledByScope]
+  );
+
+  const getActiveReplaceInfo = useCallback(
+    (scope: ReplaceLibraryScope) =>
+      replaceLibraryEnabledByScope[scope] ? buildReplaceInfoString(scope) : "",
+    [buildReplaceInfoString, replaceLibraryEnabledByScope]
   );
 
   const buildRewritePromptPayload = useCallback(
@@ -828,7 +847,7 @@ export default function RewriteModule() {
 
       try {
         if (field === "title") {
-          const titleReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("title") : "";
+          const titleReplaceInfo = getActiveReplaceInfo("title");
           const titlePromptPayload = buildRewritePromptPayload("title", titleReplaceInfo);
           const titleRes = await callRewriteApi({
             type: "title",
@@ -851,7 +870,7 @@ export default function RewriteModule() {
         }
 
         if (field === "body") {
-          const bodyReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("body") : "";
+          const bodyReplaceInfo = getActiveReplaceInfo("body");
           const bodyPromptPayload = buildRewritePromptPayload("body", bodyReplaceInfo);
           const bodyRes = await callRewriteApi({
             type: "body",
@@ -873,7 +892,7 @@ export default function RewriteModule() {
           return;
         }
 
-        const coverReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("cover") : "";
+        const coverReplaceInfo = getActiveReplaceInfo("cover");
         const originalCoverText = await ensureOriginalCoverText(note);
         const coverPromptPayload = buildRewritePromptPayload("coverText", coverReplaceInfo);
         const coverTextRes = await callRewriteApi({
@@ -924,10 +943,9 @@ export default function RewriteModule() {
     },
     [
       buildRewritePromptPayload,
-      buildReplaceInfoString,
       customTemplates,
       ensureOriginalCoverText,
-      replaceLibraryEnabled,
+      getActiveReplaceInfo,
       updateRewriteResult,
     ]
   );
@@ -960,9 +978,9 @@ export default function RewriteModule() {
 
       try {
         const note = result.originalNote;
-        const titleReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("title") : "";
-        const bodyReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("body") : "";
-        const coverReplaceInfo = replaceLibraryEnabled ? buildReplaceInfoString("cover") : "";
+        const titleReplaceInfo = getActiveReplaceInfo("title");
+        const bodyReplaceInfo = getActiveReplaceInfo("body");
+        const coverReplaceInfo = getActiveReplaceInfo("cover");
 
         const isCurrentRunActive = () =>
           !controller.signal.aborted &&
@@ -1121,10 +1139,9 @@ export default function RewriteModule() {
     },
     [
       buildRewritePromptPayload,
-      buildReplaceInfoString,
       customTemplates,
       ensureOriginalCoverText,
-      replaceLibraryEnabled,
+      getActiveReplaceInfo,
       updateRewriteResult,
     ]
   );
@@ -1148,9 +1165,12 @@ export default function RewriteModule() {
   }, [rewriteResults, startRewrite]);
 
   async function handleSaveToDraft() {
-    const selected = rewriteResults.filter(
-      (result) => selectedRewriteIds.has(result.id) && result.status === "done"
-    );
+    const selected = rewriteResults
+      .filter((result) => selectedRewriteIds.has(result.id) && result.status === "done")
+      .map((result) => ({
+        ...result,
+        originalNote: getLiveOriginalNote(result, collectRecordMap),
+      }));
     if (selected.length === 0) return;
 
     setSaving(true);
@@ -1294,6 +1314,13 @@ export default function RewriteModule() {
               updateRewriteResult(result.id, {
                 originalNote: {
                   ...result.originalNote,
+                  cover: liveRecord.cover || result.originalNote.cover,
+                  coverAttachmentToken:
+                    liveRecord.coverAttachmentToken || result.originalNote.coverAttachmentToken,
+                  coverText: liveRecord.coverText || result.originalNote.coverText,
+                  originalTitle: liveRecord.originalTitle || result.originalNote.originalTitle,
+                  originalBody: liveRecord.originalBody || result.originalNote.originalBody,
+                  originalTags: liveRecord.originalTags || result.originalNote.originalTags,
                   hasRewritten: liveRecord.hasRewritten ?? true,
                   rewriteTitle: liveRecord.rewriteTitle || result.rewrittenTitle,
                   rewriteBody: liveRecord.rewriteBody || result.rewrittenBody,
@@ -1533,20 +1560,35 @@ export default function RewriteModule() {
             }
           }}
         >
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <BookOpen className="w-4 h-4 text-amber-600" />
-              <span className="text-sm font-semibold text-amber-700">替换词库</span>
-              {LIBRARY_SCOPES.map((item) => (
-                <span key={item.scope} className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                  {item.label} {replaceEntriesByScope[item.scope].length} 条
-                </span>
-              ))}
-              {replaceLibraryEnabled && (
-                <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-600">
-                  已启用
-                </span>
-              )}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <BookOpen className="w-4 h-4 text-amber-600" />
+                <span className="text-sm font-semibold text-amber-700">替换词库</span>
+              {LIBRARY_SCOPES.map((item) => {
+                const enabled = replaceLibraryEnabledByScope[item.scope];
+
+                return (
+                  <span
+                    key={item.scope}
+                    className={clsx(
+                      "rounded-full px-2 py-0.5 text-xs",
+                      enabled ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-400"
+                    )}
+                  >
+                    {item.label} {replaceEntriesByScope[item.scope].length} 条
+                  </span>
+                );
+              })}
+              <span
+                className={clsx(
+                  "rounded-full px-2 py-0.5 text-xs font-medium",
+                  enabledLibraryCount > 0
+                    ? "bg-green-100 text-green-600"
+                    : "bg-gray-100 text-gray-500"
+                )}
+              >
+                {enabledLibraryCount > 0 ? `已启用 ${enabledLibraryCount}/3` : "全部关闭"}
+              </span>
               <span
                 className={clsx(
                   "rounded-full px-2 py-0.5 text-xs font-medium",
@@ -1568,23 +1610,40 @@ export default function RewriteModule() {
                 重置默认替换词库
               </button>
               <div
-                className="flex items-center gap-1.5 rounded-full bg-white/80 px-2 py-1 ring-1 ring-amber-100"
+                className="flex flex-wrap items-center justify-end gap-2 rounded-2xl bg-white/80 px-2 py-1.5 ring-1 ring-amber-100"
                 onClick={(e) => e.stopPropagation()}
               >
-                <span className="text-xs text-amber-600">启用</span>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setReplaceLibraryEnabled(!replaceLibraryEnabled)}
-                  onKeyDown={(e) => e.key === "Enter" && setReplaceLibraryEnabled(!replaceLibraryEnabled)}
-                  className="cursor-pointer text-amber-500 hover:text-amber-700 transition-colors"
-                >
-                  {replaceLibraryEnabled ? (
-                    <ToggleRight className="w-6 h-6 text-green-500" />
-                  ) : (
-                    <ToggleLeft className="w-6 h-6 text-gray-400" />
-                  )}
-                </div>
+                {LIBRARY_SCOPES.map((item) => {
+                  const enabled = replaceLibraryEnabledByScope[item.scope];
+
+                  return (
+                    <div
+                      key={`switch-${item.scope}`}
+                      className="flex items-center gap-1.5 rounded-full bg-amber-50/70 px-2 py-1"
+                    >
+                      <span className="text-[11px] text-amber-600">{item.label}</span>
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setReplaceLibraryScopeEnabled(item.scope, !enabled)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setReplaceLibraryScopeEnabled(item.scope, !enabled);
+                          }
+                        }}
+                        className="cursor-pointer text-amber-500 transition-colors hover:text-amber-700"
+                        aria-label={`${enabled ? "关闭" : "启用"}${item.label}`}
+                      >
+                        {enabled ? (
+                          <ToggleRight className="h-6 w-6 text-green-500" />
+                        ) : (
+                          <ToggleLeft className="h-6 w-6 text-gray-400" />
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
               <div className="flex items-center gap-1 text-xs text-amber-500">
                 <span>{libraryOpen ? "收起" : "展开"}</span>
@@ -1795,14 +1854,18 @@ export default function RewriteModule() {
                         </div>
                       )}
 
-                      {replaceLibraryEnabled && (
-                        <div className="mt-3 rounded-xl border border-amber-100 bg-amber-50/40 p-3">
-                          <p className="mb-2 text-xs font-medium text-amber-700">当前二创提示词注入预览</p>
-                          <pre className="max-h-28 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-gray-600">
-                            {buildReplaceInfoString(item.scope) || "（当前无有效词条）"}
-                          </pre>
-                        </div>
-                      )}
+                      <div className="mt-3 rounded-xl border border-amber-100 bg-amber-50/40 p-3">
+                        <p className="mb-2 text-xs font-medium text-amber-700">
+                          {replaceLibraryEnabledByScope[item.scope]
+                            ? "当前二创提示词注入预览"
+                            : `${item.label}当前未启用`}
+                        </p>
+                        <pre className="max-h-28 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-gray-600">
+                          {replaceLibraryEnabledByScope[item.scope]
+                            ? buildReplaceInfoString(item.scope) || "（当前无有效词条）"
+                            : "当前生成不会注入这组词条。"}
+                        </pre>
+                      </div>
                     </div>
                     );
                   })}
@@ -1926,6 +1989,9 @@ function RewriteRow({
     title: false,
     body: false,
   });
+  const [syncedMultilineHeights, setSyncedMultilineHeights] = useState<
+    Partial<Record<SyncedMultilineField, number>>
+  >({});
   const customTemplates = useCoverTemplateLibraryStore((state) => state.customTemplates);
   const addCustomTemplate = useCoverTemplateLibraryStore((state) => state.addCustomTemplate);
   const removeCustomTemplate = useCoverTemplateLibraryStore((state) => state.removeCustomTemplate);
@@ -1976,6 +2042,8 @@ function RewriteRow({
     )
   );
   const sequenceLabel = sequenceNumber.toString().padStart(2, "0");
+  const syncedCoverTextHeight = syncedMultilineHeights.coverText;
+  const syncedBodyHeight = syncedMultilineHeights.body;
 
   useEffect(() => {
     setExpanded(bulkExpanded);
@@ -2088,6 +2156,18 @@ function RewriteRow({
 
   function handlePublishPersonaSelect(value: string) {
     applyManualUpdate({ publishPersona: selectedPublishPersona === value ? "" : value });
+  }
+
+  function handleSyncedFieldHeightChange(field: SyncedMultilineField, nextHeight: number) {
+    if (!Number.isFinite(nextHeight) || nextHeight <= 0) return;
+
+    setSyncedMultilineHeights((current) => {
+      if (current[field] === nextHeight) return current;
+      return {
+        ...current,
+        [field]: nextHeight,
+      };
+    });
   }
 
   async function handleRetryField(field: RetryableRewriteField) {
@@ -2453,12 +2533,20 @@ function RewriteRow({
                   )}
                 </div>
 
-                {note.coverText && (
-                  <div>
-                    <p className="text-xs text-gray-400 mb-0.5">封面文案</p>
-                    <p className="text-xs text-gray-700 whitespace-pre-wrap">{note.coverText}</p>
+                <div>
+                  <p className="text-xs text-gray-400 mb-0.5">封面文案</p>
+                  <div
+                    className={clsx(
+                      "overflow-y-auto rounded-md",
+                      !syncedCoverTextHeight && "max-h-32"
+                    )}
+                    style={syncedCoverTextHeight ? { height: syncedCoverTextHeight } : undefined}
+                  >
+                    <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
+                      {note.coverText || "—"}
+                    </p>
                   </div>
-                )}
+                </div>
 
                 <div>
                   <p className="text-xs text-gray-400 mb-0.5">标题</p>
@@ -2467,9 +2555,17 @@ function RewriteRow({
 
                 <div>
                   <p className="text-xs text-gray-400 mb-0.5">正文</p>
-                  <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">
-                    {note.originalBody || "—"}
-                  </p>
+                  <div
+                    className={clsx(
+                      "overflow-y-auto rounded-md",
+                      !syncedBodyHeight && "max-h-40"
+                    )}
+                    style={syncedBodyHeight ? { height: syncedBodyHeight } : undefined}
+                  >
+                    <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
+                      {note.originalBody || "—"}
+                    </p>
+                  </div>
                 </div>
 
                 <div>
@@ -2492,15 +2588,6 @@ function RewriteRow({
               </div>
 
               <div className="relative bg-white border border-gray-200 rounded-xl p-3 space-y-2">
-                <div className="absolute right-3 top-0 z-10">
-                  <PublishPersonaRail
-                    options={PUBLISH_PERSONA_OPTIONS}
-                    value={selectedPublishPersona}
-                    onSelect={handlePublishPersonaSelect}
-                    disabled={isProcessing}
-                  />
-                </div>
-
                 {result.status === "stopped" && (
                   <div className="rounded-lg bg-amber-50/70 px-2.5 py-2 text-xs text-amber-600">
                     <p className="mb-1">已停止生成</p>
@@ -2524,80 +2611,88 @@ function RewriteRow({
                     二创封面
                   </p>
                   <div className="space-y-1">
-                    <div className="flex items-start gap-2">
-                      <div className="relative aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden w-24 flex-shrink-0 group">
-                        {result.rewrittenCover ? (
-                          <>
-                            <Image
-                              src={result.rewrittenCover}
-                              alt="二创封面"
-                              fill
-                              sizes="96px"
-                              className="object-cover"
-                              unoptimized
-                            />
-                            <HoverImageActions
-                              onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "预览" })}
-                            />
-                            {showInlineCoverLoading && (
-                              <div className="absolute inset-0 flex items-center justify-center bg-white/65 text-[11px] text-gray-500">
-                                <div className="flex flex-col items-center gap-1.5">
-                                  <div className="h-4 w-4 rounded-full border-2 border-red-300 border-t-transparent animate-spin" />
-                                  <span>封面更新中</span>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex items-start gap-2">
+                        <div className="relative aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden w-24 flex-shrink-0 group">
+                          {result.rewrittenCover ? (
+                            <>
+                              <Image
+                                src={result.rewrittenCover}
+                                alt="二创封面"
+                                fill
+                                sizes="96px"
+                                className="object-cover"
+                                unoptimized
+                              />
+                              <HoverImageActions
+                                onPreview={() => setPreviewImage({ src: result.rewrittenCover, title: "预览" })}
+                              />
+                              {showInlineCoverLoading && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-white/65 text-[11px] text-gray-500">
+                                  <div className="flex flex-col items-center gap-1.5">
+                                    <div className="h-4 w-4 rounded-full border-2 border-red-300 border-t-transparent animate-spin" />
+                                    <span>封面更新中</span>
+                                  </div>
                                 </div>
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs text-center px-1">
-                            未生成
-                          </div>
-                        )}
-                      </div>
-                      <div className="min-w-0 flex-1 space-y-2">
-                        <div className="flex flex-wrap gap-1">
-                          <label
-                            className={clsx(
-                              "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
-                              canEditGeneratedFields
-                                ? "cursor-pointer text-gray-500 hover:text-gray-700"
-                                : "cursor-not-allowed text-gray-300"
-                            )}
-                          >
-                            <Upload className="w-3 h-3" />
-                            直接替换封面
-                            <input
-                              type="file"
-                              accept="image/*"
-                              className="hidden"
-                              disabled={!canEditGeneratedFields}
-                              onChange={async (e) => {
-                                const file = e.target.files?.[0];
-                                e.currentTarget.value = "";
-                                if (!file) return;
-                                await handleFinishedImageUpload(file);
-                              }}
-                            />
-                          </label>
-                          {isUsingCustomBaseImage && (
-                            <button
-                              onClick={() => void handleResetTemplateBaseImage()}
-                              disabled={generatingCover || !canEditGeneratedFields}
-                              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
-                            >
-                              恢复模板
-                            </button>
+                              )}
+                            </>
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs text-center px-1">
+                              未生成
+                            </div>
                           )}
                         </div>
-                        <button
-                          onClick={() => setShowTemplates((current) => !current)}
-                          disabled={generatingCover || !canEditGeneratedFields}
-                          className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-500 transition-colors hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300"
-                        >
-                          {showTemplates ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                          {showTemplates ? "收起模板库" : "展开模板库"}
-                        </button>
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <div className="flex flex-wrap gap-1">
+                            <label
+                              className={clsx(
+                                "flex items-center gap-1 text-xs border border-gray-200 rounded px-2 py-1",
+                                canEditGeneratedFields
+                                  ? "cursor-pointer text-gray-500 hover:text-gray-700"
+                                  : "cursor-not-allowed text-gray-300"
+                              )}
+                            >
+                              <Upload className="w-3 h-3" />
+                              直接替换封面
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                disabled={!canEditGeneratedFields}
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  e.currentTarget.value = "";
+                                  if (!file) return;
+                                  await handleFinishedImageUpload(file);
+                                }}
+                              />
+                            </label>
+                            {isUsingCustomBaseImage && (
+                              <button
+                                onClick={() => void handleResetTemplateBaseImage()}
+                                disabled={generatingCover || !canEditGeneratedFields}
+                                className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 disabled:text-gray-300 border border-gray-200 rounded px-2 py-1 disabled:cursor-not-allowed"
+                              >
+                                恢复模板
+                              </button>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => setShowTemplates((current) => !current)}
+                            disabled={generatingCover || !canEditGeneratedFields}
+                            className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-500 transition-colors hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                          >
+                            {showTemplates ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                            {showTemplates ? "收起模板库" : "展开模板库"}
+                          </button>
+                        </div>
                       </div>
+                      <PublishPersonaChecklist
+                        options={PUBLISH_PERSONA_OPTIONS}
+                        value={selectedPublishPersona}
+                        onSelect={handlePublishPersonaSelect}
+                        disabled={isProcessing}
+                      />
                     </div>
 
                     {showTemplates && canEditGeneratedFields && (
@@ -2734,6 +2829,8 @@ function RewriteRow({
                       setEditingCoverText(false);
                     }}
                     multiline
+                    syncedHeight={syncedCoverTextHeight}
+                    onMultilineHeightChange={(height) => handleSyncedFieldHeightChange("coverText", height)}
                   />
 
                   <EditableField
@@ -2788,6 +2885,8 @@ function RewriteRow({
                       setEditingBody(false);
                     }}
                     multiline
+                    syncedHeight={syncedBodyHeight}
+                    onMultilineHeightChange={(height) => handleSyncedFieldHeightChange("body", height)}
                   />
                 </>
 
@@ -2940,7 +3039,7 @@ function ImagePreviewModal({
   );
 }
 
-function PublishPersonaRail({
+function PublishPersonaChecklist({
   options,
   value,
   onSelect,
@@ -2952,32 +3051,40 @@ function PublishPersonaRail({
   disabled?: boolean;
 }) {
   return (
-    <div className="flex items-start justify-end gap-1.5">
+    <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
       {options.map((option) => {
         const selected = option === value;
 
         return (
-          <div key={option} className="flex justify-end">
-            <button
-              type="button"
-              onClick={() => {
-                if (disabled) return;
-                onSelect(option);
-              }}
-              disabled={disabled}
+          <button
+            key={option}
+            type="button"
+            onClick={() => {
+              if (disabled) return;
+              onSelect(option);
+            }}
+            disabled={disabled}
+            className={clsx(
+              "inline-flex min-w-[88px] items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition-colors",
+              selected
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-stone-200 bg-stone-50 text-stone-500 hover:border-stone-300 hover:bg-white",
+              disabled && "cursor-not-allowed opacity-60"
+            )}
+            title={selected ? `取消${option}` : `设为${option}`}
+          >
+            <span
               className={clsx(
-                "inline-flex w-[72px] items-center justify-center rounded-b-[16px] border px-2 text-[11px] font-medium leading-none whitespace-nowrap text-center",
-                "h-8 transition-colors duration-200 ease-out",
+                "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border",
                 selected
-                  ? "border-amber-200 bg-[#fff4dd] text-[#9a6a1f]"
-                  : "border-stone-200 bg-[#f7f4ee] text-stone-500 hover:border-amber-200 hover:bg-[#fff4dd] hover:text-[#9a6a1f]",
-                disabled && "cursor-not-allowed opacity-60"
+                  ? "border-emerald-500 bg-emerald-500 text-white"
+                  : "border-stone-300 bg-white text-transparent"
               )}
-              title={selected ? `取消${option}` : `设为${option}`}
             >
-              {option}
-            </button>
-          </div>
+              <Check className="h-2.5 w-2.5" strokeWidth={3} />
+            </span>
+            <span>{option}</span>
+          </button>
         );
       })}
     </div>
@@ -3132,6 +3239,8 @@ function EditableField({
   onSave,
   onCancel,
   multiline,
+  syncedHeight,
+  onMultilineHeightChange,
 }: {
   label: string;
   value: string;
@@ -3146,8 +3255,33 @@ function EditableField({
   onSave: (value: string) => void;
   onCancel: () => void;
   multiline: boolean;
+  syncedHeight?: number;
+  onMultilineHeightChange?: (height: number) => void;
 }) {
   const [draft, setDraft] = useState(value);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!editing || !multiline || !onMultilineHeightChange) return;
+
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    const emitHeight = () => {
+      onMultilineHeightChange(textarea.offsetHeight);
+    };
+
+    emitHeight();
+
+    if (typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      emitHeight();
+    });
+
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [editing, multiline, onMultilineHeightChange]);
 
   return (
     <div>
@@ -3194,6 +3328,7 @@ function EditableField({
         <div className="space-y-1">
           {multiline ? (
             <textarea
+              ref={textareaRef}
               value={draft}
               onChange={(e) => {
                 const nextDraft = e.target.value;
@@ -3201,6 +3336,7 @@ function EditableField({
                 onDraftChange?.(nextDraft);
               }}
               className="min-h-[120px] w-full resize-y rounded border border-gray-300 p-2 text-xs focus:border-red-400 focus:outline-none"
+              style={syncedHeight ? { height: syncedHeight } : undefined}
               rows={6}
               autoFocus
             />
@@ -3235,9 +3371,17 @@ function EditableField({
       ) : loading && !value ? (
         <LoadingInlineIndicator label={loadingLabel || `${label}生成中`} />
       ) : (
-        <p className="text-xs text-gray-800 whitespace-pre-wrap leading-relaxed max-h-32 overflow-y-auto">
-          {value || "—"}
-        </p>
+        <div
+          className={clsx(
+            "overflow-y-auto rounded-md",
+            multiline && !syncedHeight && "max-h-32"
+          )}
+          style={multiline && syncedHeight ? { height: syncedHeight } : undefined}
+        >
+          <p className="text-xs text-gray-800 whitespace-pre-wrap leading-relaxed">
+            {value || "—"}
+          </p>
+        </div>
       )}
     </div>
   );
