@@ -106,11 +106,7 @@ function buildOriginalTags(result: RewriteResult) {
 }
 
 function buildRewrittenTags(result: RewriteResult) {
-  return dedupeTags(
-    result.rewrittenTags.length > 0
-      ? result.rewrittenTags
-      : (result.originalNote.originalTags || [])
-  );
+  return dedupeTags(result.rewrittenTags || []);
 }
 
 function DraftResultRow({ result }: { result: RewriteResult }) {

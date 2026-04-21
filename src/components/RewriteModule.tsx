@@ -203,11 +203,7 @@ async function buildRenderedCoverPayload(args: {
 }
 
 function buildDisplayTags(result: RewriteResult): string[] {
-  return dedupeTags(
-    result.rewrittenTags.length > 0
-      ? result.rewrittenTags
-      : (result.originalNote.originalTags || [])
-  );
+  return dedupeTags(result.rewrittenTags || []);
 }
 
 function buildOriginalTags(result: RewriteResult): string[] {
@@ -288,9 +284,16 @@ function formatRewriteModifiedTime(value?: string | null) {
 }
 
 function parseTagDraft(input: string): string[] {
-  const extracted = extractTagsFromText(input);
-  if (extracted.length > 0) return extracted;
-  return dedupeTags(input.split(/[\s、，,\n]+/));
+  const normalized = input.replace(/\[话题\]/g, " ").trim();
+  if (!normalized) return [];
+
+  const extracted = extractTagsFromText(normalized);
+  const looseTokens = normalized
+    .split(/[\s\u3000、，,#\n]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  return dedupeTags([...extracted, ...looseTokens]);
 }
 
 function formatTagDraft(tags: string[]): string {
@@ -2044,6 +2047,8 @@ function RewriteRow({
   const sequenceLabel = sequenceNumber.toString().padStart(2, "0");
   const syncedCoverTextHeight = syncedMultilineHeights.coverText;
   const syncedBodyHeight = syncedMultilineHeights.body;
+  const activeSyncedCoverTextHeight = editingCoverText ? syncedCoverTextHeight : undefined;
+  const activeSyncedBodyHeight = editingBody ? syncedBodyHeight : undefined;
 
   useEffect(() => {
     setExpanded(bulkExpanded);
@@ -2538,9 +2543,11 @@ function RewriteRow({
                   <div
                     className={clsx(
                       "overflow-y-auto rounded-md",
-                      !syncedCoverTextHeight && "max-h-32"
+                      !activeSyncedCoverTextHeight && "max-h-32"
                     )}
-                    style={syncedCoverTextHeight ? { height: syncedCoverTextHeight } : undefined}
+                    style={
+                      activeSyncedCoverTextHeight ? { height: activeSyncedCoverTextHeight } : undefined
+                    }
                   >
                     <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
                       {note.coverText || "—"}
@@ -2558,9 +2565,9 @@ function RewriteRow({
                   <div
                     className={clsx(
                       "overflow-y-auto rounded-md",
-                      !syncedBodyHeight && "max-h-40"
+                      !activeSyncedBodyHeight && "max-h-40"
                     )}
-                    style={syncedBodyHeight ? { height: syncedBodyHeight } : undefined}
+                    style={activeSyncedBodyHeight ? { height: activeSyncedBodyHeight } : undefined}
                   >
                     <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
                       {note.originalBody || "—"}
@@ -2686,14 +2693,14 @@ function RewriteRow({
                           {showTemplates ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                           {showTemplates ? "收起模板库" : "展开模板库"}
                         </button>
-                        <PublishPersonaChecklist
-                          options={PUBLISH_PERSONA_OPTIONS}
-                          value={selectedPublishPersona}
-                          onSelect={handlePublishPersonaSelect}
-                          disabled={isProcessing}
-                        />
                       </div>
                     </div>
+                    <PublishPersonaChecklist
+                      options={PUBLISH_PERSONA_OPTIONS}
+                      value={selectedPublishPersona}
+                      onSelect={handlePublishPersonaSelect}
+                      disabled={isProcessing}
+                    />
 
                     {showTemplates && canEditGeneratedFields && (
                       <div className="relative mt-2 h-[360px] min-h-[300px] max-h-[780px] resize-y overflow-x-hidden overflow-y-auto rounded-lg bg-gray-50 p-2.5">
@@ -2830,8 +2837,9 @@ function RewriteRow({
                     }}
                     multiline
                     multilineRows={4}
-                    syncedHeight={syncedCoverTextHeight}
+                    syncedHeight={activeSyncedCoverTextHeight}
                     onMultilineHeightChange={(height) => handleSyncedFieldHeightChange("coverText", height)}
+                    multilineMinHeightClassName="min-h-[84px]"
                   />
 
                   <EditableField
@@ -2886,7 +2894,7 @@ function RewriteRow({
                       setEditingBody(false);
                     }}
                     multiline
-                    syncedHeight={syncedBodyHeight}
+                    syncedHeight={activeSyncedBodyHeight}
                     onMultilineHeightChange={(height) => handleSyncedFieldHeightChange("body", height)}
                   />
                 </>
@@ -3113,11 +3121,12 @@ function EditableTagsField({
   chipClassName: string;
   disabled?: boolean;
 }) {
-  const [draft, setDraft] = useState(formatTagDraft(tags));
+  const formattedTags = formatTagDraft(tags);
+  const [draft, setDraft] = useState(formattedTags);
 
   useEffect(() => {
-    setDraft(formatTagDraft(tags));
-  }, [tags]);
+    setDraft(formattedTags);
+  }, [formattedTags]);
 
   return (
     <div>
@@ -3127,7 +3136,7 @@ function EditableTagsField({
           <button
             onClick={() => {
               if (disabled) return;
-              setDraft(formatTagDraft(tags));
+              setDraft(formattedTags);
               onEdit();
             }}
             disabled={disabled}
@@ -3142,17 +3151,18 @@ function EditableTagsField({
       </div>
       {editing ? (
         <div className="space-y-1">
-          <textarea
+          <input
+            type="text"
             value={draft}
             onChange={(e) => {
               const nextDraft = e.target.value;
               setDraft(nextDraft);
               onDraftChange?.(parseTagDraft(nextDraft));
             }}
-            className="w-full text-xs border border-gray-300 rounded p-2 resize-none focus:outline-none focus:border-red-400"
-            rows={3}
+            className="h-9 w-full rounded border border-gray-300 px-2 text-xs focus:border-red-400 focus:outline-none"
             autoFocus
-            placeholder="输入标签"
+            placeholder="#你好#世界#哈哈"
+            spellCheck={false}
           />
           <div className="flex gap-2">
             <button
@@ -3243,6 +3253,7 @@ function EditableField({
   syncedHeight,
   onMultilineHeightChange,
   multilineRows = 6,
+  multilineMinHeightClassName = "min-h-[120px]",
 }: {
   label: string;
   value: string;
@@ -3260,6 +3271,7 @@ function EditableField({
   syncedHeight?: number;
   onMultilineHeightChange?: (height: number) => void;
   multilineRows?: number;
+  multilineMinHeightClassName?: string;
 }) {
   const [draft, setDraft] = useState(value);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -3338,7 +3350,10 @@ function EditableField({
                 setDraft(nextDraft);
                 onDraftChange?.(nextDraft);
               }}
-              className="min-h-[120px] w-full resize-y rounded border border-gray-300 p-2 text-xs focus:border-red-400 focus:outline-none"
+              className={clsx(
+                multilineMinHeightClassName,
+                "w-full resize-y rounded border border-gray-300 p-2 text-xs focus:border-red-400 focus:outline-none"
+              )}
               style={syncedHeight ? { height: syncedHeight } : undefined}
               rows={multilineRows}
               autoFocus

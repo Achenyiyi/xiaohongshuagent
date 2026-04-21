@@ -478,11 +478,7 @@ async function uploadImageAttachment(source: string, fileName: string) {
 }
 
 function buildInheritedTags(result: RewriteResult): string[] {
-  return dedupeTags(
-    result.rewrittenTags.length > 0
-      ? result.rewrittenTags
-      : (result.originalNote.originalTags || [])
-  );
+  return dedupeTags(result.rewrittenTags || []);
 }
 
 async function ensureRewriteTable() {
