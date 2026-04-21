@@ -2341,7 +2341,7 @@ function RewriteRow({
           selected && "border-red-200 bg-red-50/40 shadow-[0_10px_24px_rgba(239,68,68,0.08)]"
         )}
       >
-        <div className="flex items-center gap-3 mb-2">
+        <div className="mb-2 flex items-center gap-3">
           <div className="flex-shrink-0 cursor-pointer" onClick={onToggleSelect}>
             <div
               className={clsx(
@@ -2359,9 +2359,10 @@ function RewriteRow({
           >
             #{sequenceLabel}
           </span>
+          <span className="min-w-0 flex-1 truncate text-sm text-gray-600">{displayTitle}</span>
           <StatusBadge status={result.status} saved={isSaved} />
           {editedCategories.length > 0 && (
-            <div className="flex max-w-[42%] min-w-0 flex-wrap items-center gap-1">
+            <div className="flex max-w-[38%] min-w-0 flex-wrap items-center justify-end gap-1">
               {editedCategories.map((category) => (
                 <span
                   key={category}
@@ -2377,8 +2378,6 @@ function RewriteRow({
               第 {result.batchIndex}/{result.batchTotal} 版
             </span>
           )}
-
-          <span className="flex-1 text-sm text-gray-600 truncate">{displayTitle}</span>
           {latestModifiedLabel && (
             <span className="shrink-0 whitespace-nowrap text-xs text-gray-400">
               {latestModifiedLabel}
