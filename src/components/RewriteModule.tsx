@@ -2049,6 +2049,8 @@ function RewriteRow({
   const syncedBodyHeight = syncedMultilineHeights.body;
   const activeSyncedCoverTextHeight = editingCoverText ? syncedCoverTextHeight : undefined;
   const activeSyncedBodyHeight = editingBody ? syncedBodyHeight : undefined;
+  const hasAnyGeneratedFieldEditing =
+    editingCoverText || editingTitle || editingBody || editingRewrittenTags;
 
   useEffect(() => {
     setExpanded(bulkExpanded);
@@ -2110,6 +2112,154 @@ function RewriteRow({
       delete next[field];
       return next;
     });
+  }
+
+  function beginEditingCoverText() {
+    setDraftOverride("rewrittenCoverText", result.rewrittenCoverText);
+    setEditingCoverText(true);
+  }
+
+  function beginEditingTitle() {
+    setDraftOverride("rewrittenTitle", result.rewrittenTitle);
+    setEditingTitle(true);
+  }
+
+  function beginEditingBody() {
+    setDraftOverride("rewrittenBody", result.rewrittenBody);
+    setEditingBody(true);
+  }
+
+  function beginEditingRewrittenTags() {
+    setDraftOverride("rewrittenTags", rewrittenTags);
+    setEditingRewrittenTags(true);
+  }
+
+  function closeGeneratedFieldEditors() {
+    setEditingCoverText(false);
+    setEditingTitle(false);
+    setEditingBody(false);
+    setEditingRewrittenTags(false);
+  }
+
+  function clearGeneratedFieldDrafts() {
+    clearDraftOverride("rewrittenCoverText");
+    clearDraftOverride("rewrittenTitle");
+    clearDraftOverride("rewrittenBody");
+    clearDraftOverride("rewrittenTags");
+  }
+
+  function hasDraftOverride(field: keyof RewriteEditBaseline) {
+    return Object.prototype.hasOwnProperty.call(draftOverrides, field);
+  }
+
+  function saveTitleField(value: string) {
+    applyManualUpdate({ rewrittenTitle: value });
+    clearDraftOverride("rewrittenTitle");
+    setEditingTitle(false);
+  }
+
+  function saveBodyField(value: string) {
+    applyManualUpdate({
+      rewrittenBody: normalizeRewrittenBody(value, note.originalBody || ""),
+    });
+    clearDraftOverride("rewrittenBody");
+    setEditingBody(false);
+  }
+
+  function saveRewrittenTagsField(nextTags: string[]) {
+    applyManualUpdate({ rewrittenTags: nextTags });
+    clearDraftOverride("rewrittenTags");
+    setEditingRewrittenTags(false);
+  }
+
+  async function saveCoverTextField(value: string) {
+    const nextValue = normalizeSavedCoverText(value);
+    setEditingCoverText(false);
+    clearDraftOverride("rewrittenCoverText");
+
+    if (nextValue === normalizeSavedCoverText(result.rewrittenCoverText)) {
+      return;
+    }
+
+    await rebuildCover({ rewrittenCoverText: nextValue });
+  }
+
+  function openAllGeneratedFieldEditors() {
+    beginEditingCoverText();
+    beginEditingTitle();
+    beginEditingBody();
+    beginEditingRewrittenTags();
+  }
+
+  async function handleToggleGeneratedFieldEditors() {
+    if (!canEditGeneratedFields || generatingCover) return;
+
+    if (!hasAnyGeneratedFieldEditing) {
+      openAllGeneratedFieldEditors();
+      return;
+    }
+
+    const shouldSaveCoverText = editingCoverText && hasDraftOverride("rewrittenCoverText");
+    const shouldSaveTitle = editingTitle && hasDraftOverride("rewrittenTitle");
+    const shouldSaveBody = editingBody && hasDraftOverride("rewrittenBody");
+    const shouldSaveTags = editingRewrittenTags && hasDraftOverride("rewrittenTags");
+    const hasManualFieldsToSave = shouldSaveTitle || shouldSaveBody || shouldSaveTags;
+
+    const nextTitle =
+      typeof draftOverrides.rewrittenTitle === "string"
+        ? draftOverrides.rewrittenTitle
+        : result.rewrittenTitle;
+    const nextBody = normalizeRewrittenBody(
+      typeof draftOverrides.rewrittenBody === "string"
+        ? draftOverrides.rewrittenBody
+        : result.rewrittenBody,
+      note.originalBody || ""
+    );
+    const nextTags = Array.isArray(draftOverrides.rewrittenTags)
+      ? [...draftOverrides.rewrittenTags]
+      : [...rewrittenTags];
+    const nextCoverText = normalizeSavedCoverText(
+      typeof draftOverrides.rewrittenCoverText === "string"
+        ? draftOverrides.rewrittenCoverText
+        : result.rewrittenCoverText
+    );
+
+    closeGeneratedFieldEditors();
+    clearGeneratedFieldDrafts();
+
+    const manualUpdates: Partial<RewriteResult> = {};
+    if (shouldSaveTitle) manualUpdates.rewrittenTitle = nextTitle;
+    if (shouldSaveBody) manualUpdates.rewrittenBody = nextBody;
+    if (shouldSaveTags) manualUpdates.rewrittenTags = nextTags;
+
+    if (!shouldSaveCoverText) {
+      if (hasManualFieldsToSave) {
+        applyManualUpdate(manualUpdates);
+      }
+      return;
+    }
+
+    setGeneratingCover(true);
+    try {
+      const coverPayload = await buildRenderedCoverPayload({
+        result,
+        coverText: nextCoverText,
+        customTemplates,
+      });
+
+      applyManualUpdate({
+        ...manualUpdates,
+        ...coverPayload,
+        rewrittenCoverText: nextCoverText,
+      });
+    } catch (error) {
+      console.error("本地生成封面失败:", error);
+      if (hasManualFieldsToSave) {
+        applyManualUpdate(manualUpdates);
+      }
+    } finally {
+      setGeneratingCover(false);
+    }
   }
 
   function hasMeaningfulResultChange(updates: Partial<RewriteResult>) {
@@ -2702,6 +2852,30 @@ function RewriteRow({
                       disabled={isProcessing}
                     />
 
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleGeneratedFieldEditors()}
+                        disabled={!canEditGeneratedFields || generatingCover}
+                        title={
+                          hasAnyGeneratedFieldEditing ? "保存并关闭四个编辑框" : "一键打开四个编辑框"
+                        }
+                        className={clsx(
+                          "inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors",
+                          !canEditGeneratedFields || generatingCover
+                            ? "cursor-not-allowed border-gray-200 text-gray-300"
+                            : "border-gray-200 text-gray-500 hover:border-gray-300 hover:text-gray-700"
+                        )}
+                      >
+                        {hasAnyGeneratedFieldEditing ? (
+                          <Save className="h-3 w-3" />
+                        ) : (
+                          <Edit3 className="h-3 w-3" />
+                        )}
+                        <span>{hasAnyGeneratedFieldEditing ? "一键保存" : "一键编辑"}</span>
+                      </button>
+                    </div>
+
                     {showTemplates && canEditGeneratedFields && (
                       <div className="relative mt-2 h-[360px] min-h-[300px] max-h-[780px] resize-y overflow-x-hidden overflow-y-auto rounded-lg bg-gray-50 p-2.5">
                         <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-gray-200 bg-white/90 px-3 py-2.5">
@@ -2819,18 +2993,10 @@ function RewriteRow({
                     disabled={!canEditGeneratedFields}
                     loading={showInlineCoverTextLoading}
                     loadingLabel="二创封面文案生成中"
-                    onEdit={() => {
-                      setDraftOverride("rewrittenCoverText", result.rewrittenCoverText);
-                      setEditingCoverText(true);
-                    }}
+                    onEdit={beginEditingCoverText}
                     onRetry={() => handleRetryField("coverText")}
                     onDraftChange={(value) => setDraftOverride("rewrittenCoverText", value)}
-                    onSave={(value) => {
-                      const nextValue = normalizeSavedCoverText(value);
-                      setEditingCoverText(false);
-                      clearDraftOverride("rewrittenCoverText");
-                      void rebuildCover({ rewrittenCoverText: nextValue });
-                    }}
+                    onSave={(value) => void saveCoverTextField(value)}
                     onCancel={() => {
                       clearDraftOverride("rewrittenCoverText");
                       setEditingCoverText(false);
@@ -2850,17 +3016,10 @@ function RewriteRow({
                     disabled={!canEditGeneratedFields}
                     loading={showInlineTitleLoading}
                     loadingLabel="二创标题生成中"
-                    onEdit={() => {
-                      setDraftOverride("rewrittenTitle", result.rewrittenTitle);
-                      setEditingTitle(true);
-                    }}
+                    onEdit={beginEditingTitle}
                     onRetry={() => handleRetryField("title")}
                     onDraftChange={(value) => setDraftOverride("rewrittenTitle", value)}
-                    onSave={(value) => {
-                      applyManualUpdate({ rewrittenTitle: value });
-                      clearDraftOverride("rewrittenTitle");
-                      setEditingTitle(false);
-                    }}
+                    onSave={saveTitleField}
                     onCancel={() => {
                       clearDraftOverride("rewrittenTitle");
                       setEditingTitle(false);
@@ -2876,19 +3035,10 @@ function RewriteRow({
                     disabled={!canEditGeneratedFields}
                     loading={showInlineBodyLoading}
                     loadingLabel="二创正文生成中"
-                    onEdit={() => {
-                      setDraftOverride("rewrittenBody", result.rewrittenBody);
-                      setEditingBody(true);
-                    }}
+                    onEdit={beginEditingBody}
                     onRetry={() => handleRetryField("body")}
                     onDraftChange={(value) => setDraftOverride("rewrittenBody", value)}
-                    onSave={(value) => {
-                      applyManualUpdate({
-                        rewrittenBody: normalizeRewrittenBody(value, note.originalBody || ""),
-                      });
-                      clearDraftOverride("rewrittenBody");
-                      setEditingBody(false);
-                    }}
+                    onSave={saveBodyField}
                     onCancel={() => {
                       clearDraftOverride("rewrittenBody");
                       setEditingBody(false);
@@ -2904,16 +3054,9 @@ function RewriteRow({
                   tags={rewrittenTags}
                   editing={editingRewrittenTags}
                   disabled={!canEditGeneratedFields}
-                  onEdit={() => {
-                    setDraftOverride("rewrittenTags", rewrittenTags);
-                    setEditingRewrittenTags(true);
-                  }}
+                  onEdit={beginEditingRewrittenTags}
                   onDraftChange={(nextTags) => setDraftOverride("rewrittenTags", nextTags)}
-                  onSave={(nextTags) => {
-                    applyManualUpdate({ rewrittenTags: nextTags });
-                    clearDraftOverride("rewrittenTags");
-                    setEditingRewrittenTags(false);
-                  }}
+                  onSave={saveRewrittenTagsField}
                   onCancel={() => {
                     clearDraftOverride("rewrittenTags");
                     setEditingRewrittenTags(false);
@@ -3275,6 +3418,11 @@ function EditableField({
 }) {
   const [draft, setDraft] = useState(value);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    setDraft(value);
+  }, [editing, value]);
 
   useEffect(() => {
     if (!editing || !multiline || !onMultilineHeightChange) return;
