@@ -6,9 +6,7 @@
     "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "feishu:migrate": "node --env-file-if-exists=.env.local tools/feishu/migrate-bitable.mjs",
-    "feishu:migrate:execute": "node --env-file-if-exists=.env.local tools/feishu/migrate-bitable.mjs --execute"
+    "lint": "eslint"
   },
   "dependencies": {
     "axios": "^1.15.0",
